@@ -1,10 +1,10 @@
 #include "Arduino.h"
 
 class Debug {
- private:
+private:
   bool enabled;
 
- public:
+public:
   void setEnabled(bool enabled);
   bool isEnabled();
   void waitForSerialConnection();
@@ -33,5 +33,6 @@ class Debug {
   void print(String message, String message2, String message3);
   void println(String message, String message2, String message3);
   void print(String message, String message2, String message3, String message4);
-  void println(String message, String message2, String message3, String message4);
+  void println(String message, String message2, String message3,
+               String message4);
 };

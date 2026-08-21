@@ -14,8 +14,8 @@
  * Data-source semantics (proto/UPSTREAM.md, validated against the pinned
  * server): a frame tagged READER is a *command* (terminal -> card); a frame
  * tagged CARD is the *response* (card -> terminal). So:
- *   - READER role: consumes READER-tagged commands, replays them to the physical
- *     card, and produces CARD-tagged responses.
+ *   - READER role: consumes READER-tagged commands, replays them to the
+ * physical card, and produces CARD-tagged responses.
  *   - CARD/HCE role: reads the terminal's commands over RF and produces
  *     READER-tagged commands, then consumes the CARD-tagged responses that come
  *     back over TCP and injects them to the terminal.
@@ -34,11 +34,11 @@
 #include "NfcGateLink.h"
 
 class RelayEngine {
- public:
+public:
   enum class State : uint8_t {
-    Idle,       // before begin()
-    Relaying,   // NFC up, link connected, SYN sent — shuttling APDUs
-    Error,      // NFC bring-up, link, or handshake failed / link dropped
+    Idle,     // before begin()
+    Relaying, // NFC up, link connected, SYN sent — shuttling APDUs
+    Error,    // NFC bring-up, link, or handshake failed / link dropped
   };
 
   // `nfc`, `link` and `cfg` must outlive the engine (all are typically globals
@@ -94,23 +94,24 @@ class RelayEngine {
   // When a sink is set, a COPY of every relayed APDU is emitted to it as one
   // structured event line:  ":apdu <dir> <ts_ms> <hex>\n"  where dir is "cmd"
   // (terminal -> card, i.e. PCD -> PICC) or "resp" (card -> terminal, i.e.
-  // PICC -> PCD) and ts_ms is the device's millis() at that moment (ground-truth
-  // timestamp). This runs OFF the hot path: the relay APDU itself still travels
-  // over WiFi/TCP; this is only a copy for the host-side pcap writer
-  // (tools/ `bombercat capture`). Pass nullptr to disable. The sink is normally
-  // the same Serial the control REPL uses; the ":" marker keeps it distinct from
-  // human log lines, matching SerialControl's leading-marker protocol.
+  // PICC -> PCD) and ts_ms is the device's millis() at that moment
+  // (ground-truth timestamp). This runs OFF the hot path: the relay APDU itself
+  // still travels over WiFi/TCP; this is only a copy for the host-side pcap
+  // writer (tools/ `bombercat capture`). Pass nullptr to disable. The sink is
+  // normally the same Serial the control REPL uses; the ":" marker keeps it
+  // distinct from human log lines, matching SerialControl's leading-marker
+  // protocol.
   void setCapture(Print *sink) { _captureOut = sink; }
   bool capturing() const { return _captureOut != nullptr; }
 
- private:
+private:
   void handleFrame(const ServerData &sd, const NfcData &nfc);
   void readerHandleCommand(const NfcData &nfc);
 
   // READER (Camino B1): emit the one-off NFCGate INITIAL frame carrying the
   // physical tag's activation config (UID/SAK/ATQA/ATS) so a rooted NFCGate
-  // emulator peer configures its HCE and presents THIS tag to the terminal. Sets
-  // _initialSent on success; self-throttled while waiting for a card to be
+  // emulator peer configures its HCE and presents THIS tag to the terminal.
+  // Sets _initialSent on success; self-throttled while waiting for a card to be
   // placed. A BomberCat card peer ignores INITIAL, so this is inert for A/B2.
   bool emitInitialConfig();
 
@@ -124,13 +125,14 @@ class RelayEngine {
 
   State _state = State::Idle;
   bool _peerReady = false;
-  bool _tagReady = false;  // READER: a physical card is currently activated
-  bool _awaitingResponse = false;  // CARD: a command was forwarded, response due
-  uint8_t _awaitTimeouts = 0;      // CARD: consecutive forwarded-but-unanswered
-                                   // commands (dead-link detector; see below)
-  bool _initialSent = false;         // READER: one-off tag-config INITIAL emitted
-  unsigned long _initialAttemptAt = 0;  // READER: millis() of last INITIAL attempt
-                                        // (throttles the waitForTag probe)
+  bool _tagReady = false; // READER: a physical card is currently activated
+  bool _awaitingResponse = false; // CARD: a command was forwarded, response due
+  uint8_t _awaitTimeouts = 0;     // CARD: consecutive forwarded-but-unanswered
+                                  // commands (dead-link detector; see below)
+  bool _initialSent = false;      // READER: one-off tag-config INITIAL emitted
+  unsigned long _initialAttemptAt =
+      0; // READER: millis() of last INITIAL attempt
+         // (throttles the waitForTag probe)
   uint32_t _relayed = 0;
 
   // Fase 8 APDU capture tap: when non-null, each relayed APDU is copied out as
@@ -138,16 +140,18 @@ class RelayEngine {
   Print *_captureOut = nullptr;
 
   // Diagnostics / robustness (Fase 7 RF bring-up).
-  unsigned long _lastHeartbeat = 0;  // throttles the per-role liveness log
-  unsigned long _awaitStart = 0;     // CARD: millis() when _awaitingResponse latched
+  unsigned long _lastHeartbeat = 0; // throttles the per-role liveness log
+  unsigned long _awaitStart =
+      0; // CARD: millis() when _awaitingResponse latched
 
   // CARD emulation re-arm: the raw cardReceive path does not restart discovery
   // on RF_DEACTIVATE_NTF, so after a terminal leaves the emulated card goes
   // dormant. We re-arm once the card has been idle for REARM_IDLE_MS *after*
   // having seen terminal activity — recovering listen mode for the next
   // terminal without churning discovery when no terminal is ever present.
-  unsigned long _lastCardActivity = 0;      // millis() of last frame from terminal
-  bool _cardActivitySinceReArm = false;     // a terminal has activated us since re-arm
+  unsigned long _lastCardActivity = 0; // millis() of last frame from terminal
+  bool _cardActivitySinceReArm =
+      false; // a terminal has activated us since re-arm
 
   // CARD: if the peer never returns a response (reader has no card, transceive
   // failed, or the relayed frame never reached it), don't deadlock forever —
@@ -164,17 +168,18 @@ class RelayEngine {
 
   // READER: time budget for activating the physical card at a TRANSACTION
   // BOUNDARY (the first command, where readerHandleCommand's sessionWasLive is
-  // false). A marginal card — present but poorly coupled/positioned — can miss a
-  // single 500 ms discovery window, and the old fixed "2 attempts" dropped the
-  // whole transaction on the second miss (~1 s of trying). Instead, keep looping
-  // discovery windows + re-arms until this budget elapses, so a present-but-marginal
-  // card gets several chances to activate. Re-arming (beginReaderMode) between
-  // windows resets a stuck discovery, which helps a marginal card more than one
-  // longer wait would. Sized to stay well under the card peer's AWAIT_TIMEOUT_MS
-  // (5000): activation ≤ this + a fast SELECT PPSE transceive + WiFi/TCP round
-  // trips must still answer within one await cycle, so we leave ~2 s of headroom.
-  // MID-transaction this NEVER runs (sessionWasLive gates it), so it cannot
-  // inflate a per-APDU window or the terminal's WTX budget — that path fail-fasts.
+  // false). A marginal card — present but poorly coupled/positioned — can miss
+  // a single 500 ms discovery window, and the old fixed "2 attempts" dropped
+  // the whole transaction on the second miss (~1 s of trying). Instead, keep
+  // looping discovery windows + re-arms until this budget elapses, so a
+  // present-but-marginal card gets several chances to activate. Re-arming
+  // (beginReaderMode) between windows resets a stuck discovery, which helps a
+  // marginal card more than one longer wait would. Sized to stay well under the
+  // card peer's AWAIT_TIMEOUT_MS (5000): activation ≤ this + a fast SELECT PPSE
+  // transceive + WiFi/TCP round trips must still answer within one await cycle,
+  // so we leave ~2 s of headroom. MID-transaction this NEVER runs
+  // (sessionWasLive gates it), so it cannot inflate a per-APDU window or the
+  // terminal's WTX budget — that path fail-fasts.
   static const unsigned long READER_BOUNDARY_ACTIVATE_MS = 3000;
 
   // READER: minimum gap between attempts to emit the one-off INITIAL tag-config
@@ -184,16 +189,16 @@ class RelayEngine {
   static const unsigned long INITIAL_RETRY_MS = 1000;
 
   // CARD emulation re-arm idle threshold. cardReArm() does a FULL chip re-init
-  // (beginEmulationMode), which tears down the emulated card's ISO-DEP session —
-  // fine BETWEEN transactions (recovering listen mode for the next terminal),
+  // (beginEmulationMode), which tears down the emulated card's ISO-DEP session
+  // — fine BETWEEN transactions (recovering listen mode for the next terminal),
   // catastrophic DURING one. At 2000 ms this fired on a mere mid-transaction
-  // pause: a terminal that took a beat to build the GPO after the SELECT AID FCI
-  // came back to a re-armed (fresh) card and aborted, so the card never even
-  // captured the GPO (intermittent: it only crossed when the terminal was fast
-  // enough to beat the timer). A coupled EMV transaction completes in a few
-  // seconds of continuous activity, so only a much longer gap reliably means the
-  // terminal truly left — raised to 8000 so a normal inter-command pause can
-  // never trip the re-arm mid-flow.
+  // pause: a terminal that took a beat to build the GPO after the SELECT AID
+  // FCI came back to a re-armed (fresh) card and aborted, so the card never
+  // even captured the GPO (intermittent: it only crossed when the terminal was
+  // fast enough to beat the timer). A coupled EMV transaction completes in a
+  // few seconds of continuous activity, so only a much longer gap reliably
+  // means the terminal truly left — raised to 8000 so a normal inter-command
+  // pause can never trip the re-arm mid-flow.
   static const unsigned long REARM_IDLE_MS = 8000;
 
   // CARD: how many consecutive forwarded-but-unanswered commands to tolerate
@@ -208,29 +213,30 @@ class RelayEngine {
   // With a threshold of 1 the very FIRST 5s stall tore down the link, which is
   // exactly what broke Camino A (two BomberCats): on the first command of a
   // transaction the reader peer re-arms its RF front-end
-  // (waitForTag + beginReaderMode + waitForTag + readerTransceive ≈ 2.5–4s, plus
-  // WiFi/TCP round trips), so a legitimately-slow-but-healthy reader can brush
-  // past AWAIT_TIMEOUT_MS on that first APDU. A threshold of 1 then reconnected
-  // right as the reader was re-arming, losing the response and livelocking into
-  // "relays zero". Against the NFCGate phone (Camino B2) the reader answers fast
-  // with no re-arm, so this is inert there. Tolerate a few re-poll cycles first
-  // (the terminal re-drives each one); only a genuinely dead half-open socket
-  // stays silent across all of them and still reconnects (just later).
+  // (waitForTag + beginReaderMode + waitForTag + readerTransceive ≈ 2.5–4s,
+  // plus WiFi/TCP round trips), so a legitimately-slow-but-healthy reader can
+  // brush past AWAIT_TIMEOUT_MS on that first APDU. A threshold of 1 then
+  // reconnected right as the reader was re-arming, losing the response and
+  // livelocking into "relays zero". Against the NFCGate phone (Camino B2) the
+  // reader answers fast with no re-arm, so this is inert there. Tolerate a few
+  // re-poll cycles first (the terminal re-drives each one); only a genuinely
+  // dead half-open socket stays silent across all of them and still reconnects
+  // (just later).
   static const uint8_t AWAIT_TIMEOUTS_BEFORE_RECONNECT = 3;
 
-  // Max command/received-frame length handled in one go. NfcController's receive
-  // primitives (cardModeReceive) report length in a single NCI byte, so an
-  // inbound frame is capped at 255 B here; longer ones are dropped with a
+  // Max command/received-frame length handled in one go. NfcController's
+  // receive primitives (cardModeReceive) report length in a single NCI byte, so
+  // an inbound frame is capped at 255 B here; longer ones are dropped with a
   // warning. EMV commands fit comfortably.
   static const size_t RELAY_MAX_APDU = 255;
 
   // Max response length injected back to the terminal. Unlike commands, ISO-DEP
   // *responses* routinely exceed 255 B (EMV READ RECORD certificate records
-  // reach 256 B — a 256 B response was silently dropped end-to-end in Camino B2).
-  // NfcController::cardSend() fragments the
-  // outbound NCI data packets (PBF), so the ceiling here is the NFCData.data
-  // field capacity (512), not the 255 B single-packet limit.
+  // reach 256 B — a 256 B response was silently dropped end-to-end in Camino
+  // B2). NfcController::cardSend() fragments the outbound NCI data packets
+  // (PBF), so the ceiling here is the NFCData.data field capacity (512), not
+  // the 255 B single-packet limit.
   static const size_t RELAY_MAX_RESP = 512;
 };
 
-#endif  // BOMBERCAT_CORE_RELAYENGINE_H
+#endif // BOMBERCAT_CORE_RELAYENGINE_H

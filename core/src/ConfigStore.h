@@ -20,7 +20,7 @@
 class FlashIAPBlockDevice;
 namespace mbed {
 class TDBStore;
-}  // namespace mbed
+} // namespace mbed
 
 // Which end of the relay this device plays. Matches NFCData.data_source roles
 // documented in proto/UPSTREAM.md: READER reads a physical card, CARD emulates
@@ -36,19 +36,19 @@ static const uint16_t NFCGATE_DEFAULT_PORT = 5566;
 // Fixed-size, flash-persistable configuration record. Kept as a POD so it can
 // be written/read to TDBStore as a raw byte blob. Do not add non-trivial types.
 struct RelayConfig {
-  char ssid[64];    // WiFi SSID
-  char pass[64];    // WiFi passphrase
-  char server[64];  // nfcgate-server host (name or IP)
-  uint16_t port;    // nfcgate-server TCP port
-  uint8_t session;  // session byte (1..255); groups the two relay peers
-  uint8_t role;     // RelayRole as raw byte
+  char ssid[64];   // WiFi SSID
+  char pass[64];   // WiFi passphrase
+  char server[64]; // nfcgate-server host (name or IP)
+  uint16_t port;   // nfcgate-server TCP port
+  uint8_t session; // session byte (1..255); groups the two relay peers
+  uint8_t role;    // RelayRole as raw byte
 
   RelayRole roleEnum() const { return static_cast<RelayRole>(role); }
   void setRole(RelayRole r) { role = static_cast<uint8_t>(r); }
 };
 
 class ConfigStore {
- public:
+public:
   ConfigStore() = default;
   ~ConfigStore();
 
@@ -57,7 +57,8 @@ class ConfigStore {
   bool begin();
 
   // Load persisted config into `out`. Returns true if a saved record was found.
-  // When false, `out` is populated with defaults() so callers can always use it.
+  // When false, `out` is populated with defaults() so callers can always use
+  // it.
   bool load(RelayConfig &out);
 
   // Persist `cfg`. Returns true on success.
@@ -69,10 +70,10 @@ class ConfigStore {
   // Factory defaults: empty credentials, default port, session 1, READER role.
   static RelayConfig defaults();
 
- private:
+private:
   bool _ready = false;
   FlashIAPBlockDevice *_bd = nullptr;
   mbed::TDBStore *_store = nullptr;
 };
 
-#endif  // BOMBERCAT_CORE_CONFIGSTORE_H
+#endif // BOMBERCAT_CORE_CONFIGSTORE_H

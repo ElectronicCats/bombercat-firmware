@@ -14,8 +14,8 @@
   Bomber Cat
   - RP2040
 
-  Electronic Cats invests time and resources providing this open source code, 
-  please support Electronic Cats and open-source hardware by purchasing 
+  Electronic Cats invests time and resources providing this open source code,
+  please support Electronic Cats and open-source hardware by purchasing
   products from Electronic Cats!
 
   This code is beerware; if you see me (or any other Electronic Cats
@@ -23,18 +23,18 @@
   please buy us a round!
   Distributed as-is; no warranty is given.
 */
-#include "PluggableUSBMSD.h"
 #include "FlashIAPBlockDevice.h"
+#include "PluggableUSBMSD.h"
 
 #define DEBUG
-#define L1         (LED_BUILTIN)  //LED1
+#define L1 (LED_BUILTIN) // LED1
 
-#define PIN_A      (6) //MagSpoof-1
-#define PIN_B      (7) //MagSpoof
+#define PIN_A (6) // MagSpoof-1
+#define PIN_B (7) // MagSpoof
 
-#define NPIN       (5) //Button
+#define NPIN (5) // Button
 
-#define CLOCK_US   (500)
+#define CLOCK_US (500)
 
 #define BETWEEN_ZERO (53) // 53 zeros between track1 & 2
 
@@ -46,12 +46,8 @@ char tracks[2][128];
 
 char revTrack[41];
 
-const int sublen[] = {
-  32, 48, 48 
-};
-const int bitlen[] = {
-  7, 5, 5 
-};
+const int sublen[] = {32, 48, 48};
+const int bitlen[] = {7, 5, 5};
 
 unsigned int curTrack = 0;
 int dir;
@@ -62,20 +58,18 @@ USBMSD MassStorage(&bd);
 
 FILE *f = nullptr;
 
-char buf[255] { 0 };
+char buf[255]{0};
 
 const char *fname = "/fs/data.csv";
 
-void USBMSD::begin()
-{
+void USBMSD::begin() {
   int err = getFileSystem().mount(&bd);
   if (err) {
     err = getFileSystem().reformat(&bd);
   }
 }
 
-mbed::FATFileSystem &USBMSD::getFileSystem()
-{
+mbed::FATFileSystem &USBMSD::getFileSystem() {
   static mbed::FATFileSystem fs("fs");
   return fs;
 }
@@ -87,14 +81,13 @@ void readContents() {
       Serial.print(buf);
     fclose(f);
     Serial.println("File found");
-  }
-  else {
+  } else {
     Serial.println("File not found");
   }
 }
 
-void blink(int pin, int msdelay, int times){
-  for (int i = 0; i < times; i++){
+void blink(int pin, int msdelay, int times) {
+  for (int i = 0; i < times; i++) {
     digitalWrite(pin, HIGH);
     delay(msdelay);
     digitalWrite(pin, LOW);
@@ -103,53 +96,51 @@ void blink(int pin, int msdelay, int times){
 }
 
 // send a single bit out
-void playBit(int sendBit){
+void playBit(int sendBit) {
   dir ^= 1;
   digitalWrite(PIN_A, dir);
   digitalWrite(PIN_B, !dir);
   delayMicroseconds(CLOCK_US);
 
-  if (sendBit){
+  if (sendBit) {
     dir ^= 1;
     digitalWrite(PIN_A, dir);
     digitalWrite(PIN_B, !dir);
   }
   delayMicroseconds(CLOCK_US);
-
 }
 
 // when reversing
-void reverseTrack(int track){
+void reverseTrack(int track) {
   int i = 0;
   track--; // index 0
   dir = 0;
 
-  while (revTrack[i++] != '\0');
+  while (revTrack[i++] != '\0')
+    ;
   i--;
   while (i--)
-    for (int j = bitlen[track]-1; j >= 0; j--)
+    for (int j = bitlen[track] - 1; j >= 0; j--)
       playBit((revTrack[i] >> j) & 1);
 }
 
 // plays out a full track, calculating CRCs and LRC
-void playTrack(int track){
+void playTrack(int track) {
   int tmp, crc, lrc = 0;
   dir = 0;
   track--; // index 0
   // enable H-bridge and LED
-  //digitalWrite(ENABLE_PIN, HIGH);
+  // digitalWrite(ENABLE_PIN, HIGH);
 
   // First put out a bunch of leading zeros.
   for (int i = 0; i < 25; i++)
     playBit(0);
 
-  for (int i = 0; tracks[track][i] != '\0'; i++)
-  {
+  for (int i = 0; tracks[track][i] != '\0'; i++) {
     crc = 1;
     tmp = tracks[track][i] - sublen[track];
-    
-    for (int j = 0; j < bitlen[track]-1; j++)
-    {
+
+    for (int j = 0; j < bitlen[track] - 1; j++) {
       crc ^= tmp & 1;
       lrc ^= (tmp & 1) << j;
       playBit(tmp & 1);
@@ -161,8 +152,7 @@ void playTrack(int track){
   // finish calculating and send last "byte" (LRC)
   tmp = lrc;
   crc = 1;
-  for (int j = 0; j < bitlen[track]-1; j++)
-  {
+  for (int j = 0; j < bitlen[track] - 1; j++) {
     crc ^= tmp & 1;
     playBit(tmp & 1);
     tmp >>= 1;
@@ -170,8 +160,7 @@ void playTrack(int track){
   playBit(crc);
 
   // if track 1, play 2nd track in reverse (like swiping back?)
-  if (track == 0)
-  {
+  if (track == 0) {
     // if track 1, also play track 2 in reverse
     // zeros in between
     for (int i = 0; i < BETWEEN_ZERO; i++)
@@ -187,58 +176,46 @@ void playTrack(int track){
 
   digitalWrite(PIN_A, LOW);
   digitalWrite(PIN_B, LOW);
-
 }
 
 // stores track for reverse usage later
-void storeRevTrack(int track){
+void storeRevTrack(int track) {
   int i, tmp, crc, lrc = 0;
   track--; // index 0
   dir = 0;
 
-  for (i = 0; tracks[track][i] != '\0'; i++)
-  {
+  for (i = 0; tracks[track][i] != '\0'; i++) {
     crc = 1;
     tmp = tracks[track][i] - sublen[track];
 
-    for (int j = 0; j < bitlen[track]-1; j++)
-    {
+    for (int j = 0; j < bitlen[track] - 1; j++) {
       crc ^= tmp & 1;
       lrc ^= (tmp & 1) << j;
-      tmp & 1 ?
-        (revTrack[i] |= 1 << j) :
-        (revTrack[i] &= ~(1 << j));
+      tmp & 1 ? (revTrack[i] |= 1 << j) : (revTrack[i] &= ~(1 << j));
       tmp >>= 1;
     }
-    crc ?
-      (revTrack[i] |= 1 << 4) :
-      (revTrack[i] &= ~(1 << 4));
+    crc ? (revTrack[i] |= 1 << 4) : (revTrack[i] &= ~(1 << 4));
   }
 
   // finish calculating and send last "byte" (LRC)
   tmp = lrc;
   crc = 1;
-  for (int j = 0; j < bitlen[track]-1; j++)
-  {
+  for (int j = 0; j < bitlen[track] - 1; j++) {
     crc ^= tmp & 1;
-    tmp & 1 ?
-      (revTrack[i] |= 1 << j) :
-      (revTrack[i] &= ~(1 << j));
+    tmp & 1 ? (revTrack[i] |= 1 << j) : (revTrack[i] &= ~(1 << j));
     tmp >>= 1;
   }
-  crc ?
-    (revTrack[i] |= 1 << 4) :
-    (revTrack[i] &= ~(1 << 4));
+  crc ? (revTrack[i] |= 1 << 4) : (revTrack[i] &= ~(1 << 4));
 
   i++;
   revTrack[i] = '\0';
 }
 
-void magspoof(){
-    Serial.println("Activating MagSpoof...");
-    playTrack(1 + (curTrack++ % 2));
-    blink(L1, 150, 3);
-    delay(400);
+void magspoof() {
+  Serial.println("Activating MagSpoof...");
+  playTrack(1 + (curTrack++ % 2));
+  blink(L1, 150, 3);
+  delay(400);
 }
 
 void setup() {
@@ -248,22 +225,22 @@ void setup() {
   pinMode(PIN_B, OUTPUT);
   pinMode(L1, OUTPUT);
   pinMode(NPIN, INPUT_PULLUP);
-  
-  #ifdef DEBUG
+
+#ifdef DEBUG
   while (!Serial) {
     ; // wait for serial port to connect. Needed for native USB port only
   }
-  #endif
+#endif
   Serial.println("BomberCat, yes Sir!");
   Serial.println("MagSpoof Attack!!");
-  
+
   f = fopen(fname, "r");
   if (f != nullptr) {
-    while (std::fgets(buf, 255 , f) != nullptr){
+    while (std::fgets(buf, 255, f) != nullptr) {
       Serial.print("Buf: ");
       Serial.write(buf);
       Serial.println();
-      int i,j;
+      int i, j;
       j = 0;
       for (i = 0; i < 255; i++) {
         if (buf[i] == '?' && j == 0) {
@@ -273,8 +250,7 @@ void setup() {
         }
         if (j == 0) {
           tracks[0][i] = buf[i];
-        }
-        else {
+        } else {
           tracks[1][i - j] = buf[i + 1];
           if (buf[i + 1] == '?') {
             tracks[1][i - j + 1] = NULL;
@@ -297,5 +273,4 @@ void setup() {
 
 void loop() {
   // put your main code here, to run repeatedly:
-
 }

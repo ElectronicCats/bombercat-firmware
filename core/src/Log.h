@@ -32,7 +32,7 @@ enum class LogLevel : uint8_t {
 };
 
 class Log {
- public:
+public:
   // Bind the sink stream and initial level. Until begin() is called, all
   // logging is silently dropped (out() returns a null sink).
   static void begin(Stream &out, LogLevel level = LogLevel::Info);
@@ -58,7 +58,7 @@ class Log {
   static void hex(LogLevel level, const char *label, const uint8_t *data,
                   size_t len);
 
- private:
+private:
   static Stream *_out;
   static LogLevel _level;
 };
@@ -70,4 +70,4 @@ class Log {
 #define LOG_INFO(msg) Log::line(LogLevel::Info, (msg))
 #define LOG_DEBUG(msg) Log::line(LogLevel::Debug, (msg))
 
-#endif  // BOMBERCAT_CORE_LOG_H
+#endif // BOMBERCAT_CORE_LOG_H

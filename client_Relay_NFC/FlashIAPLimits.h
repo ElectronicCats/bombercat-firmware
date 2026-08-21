@@ -1,5 +1,5 @@
 // Ensures that this file is only included once
-#pragma once 
+#pragma once
 
 #include <Arduino.h>
 #include <FlashIAP.h>
@@ -16,8 +16,7 @@ struct FlashIAPLimits {
 
 // Get the actual start address and available size for the FlashIAP Block Device
 // considering the space already occupied by the sketch (firmware).
-FlashIAPLimits getFlashIAPLimits()
-{
+FlashIAPLimits getFlashIAPLimits() {
   // Alignment lambdas
   auto align_down = [](uint64_t val, uint64_t size) {
     return (((val) / size)) * size;
@@ -33,7 +32,7 @@ FlashIAPLimits getFlashIAPLimits()
 
   auto result = flash.init();
   if (result != 0)
-    return { };
+    return {};
 
   // Find the start of first sector after text area
   int sector_size = flash.get_sector_size(FLASHIAP_APP_ROM_END_ADDR);
@@ -48,5 +47,5 @@ FlashIAPLimits getFlashIAPLimits()
     available_size = align_down(available_size, sector_size * 2);
   }
 
-  return { flash_size, start_address, available_size };
+  return {flash_size, start_address, available_size};
 }

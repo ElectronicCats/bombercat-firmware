@@ -33,4 +33,4 @@
 // protobuf types (NFCData / ServerData) generated in Fase 1 along with short
 // aliases (NfcData / ServerData / NfcSource / NfcOpcode).
 
-#endif  // BOMBERCAT_CORE_H
+#endif // BOMBERCAT_CORE_H

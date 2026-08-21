@@ -1,4 +1,4 @@
-const char* login_html = R"=====(<!DOCTYPE html>
+const char *login_html = R"=====(<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">

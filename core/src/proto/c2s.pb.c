@@ -6,9 +6,5 @@
 #error Regenerate this file with the current version of nanopb generator.
 #endif
 
-PB_BIND(de_tu_darmstadt_seemoo_nfcgate_network_c2s_ServerData, de_tu_darmstadt_seemoo_nfcgate_network_c2s_ServerData, 2)
-
-
-
-
-
+PB_BIND(de_tu_darmstadt_seemoo_nfcgate_network_c2s_ServerData,
+        de_tu_darmstadt_seemoo_nfcgate_network_c2s_ServerData, 2)

@@ -40,7 +40,8 @@ inline FlashIAPLimits getFlashIAPLimits() {
   FlashIAP flash;
 
   auto result = flash.init();
-  if (result != 0) return {};
+  if (result != 0)
+    return {};
 
   // Find the start of the first sector after the text area.
   int sector_size = flash.get_sector_size(FLASHIAP_APP_ROM_END_ADDR);
@@ -58,6 +59,6 @@ inline FlashIAPLimits getFlashIAPLimits() {
   return {flash_size, start_address, available_size};
 }
 
-}  // namespace mbed
+} // namespace mbed
 
-#endif  // BOMBERCAT_CORE_FLASHIAPLIMITS_H
+#endif // BOMBERCAT_CORE_FLASHIAPLIMITS_H

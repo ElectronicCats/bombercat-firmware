@@ -68,10 +68,10 @@ void setup() {
       LOG_ERROR("codec round-trip failed");
     }
   }
-  link.setSession(cfg.session);  // reference NfcGateLink symbols
+  link.setSession(cfg.session); // reference NfcGateLink symbols
 
   // --- SerialControl (Fase 6) --- announce readiness; no callbacks wired here.
-  SerialControl::Callbacks cb;  // all null: run/stop/reboot return -ERR/no-op
+  SerialControl::Callbacks cb; // all null: run/stop/reboot return -ERR/no-op
   control.setCallbacks(cb);
   control.begin();
 
@@ -82,7 +82,7 @@ void setup() {
 
   // --- NfcController ---
   bool ok = (cfg.roleEnum() == RelayRole::READER) ? nfc.beginReaderMode()
-                                                   : nfc.beginEmulationMode();
+                                                  : nfc.beginEmulationMode();
   if (!ok) {
     LOG_ERROR("NFC bring-up failed");
     return;
@@ -91,7 +91,7 @@ void setup() {
 }
 
 void loop() {
-  control.poll();  // service the control REPL (Fase 6)
+  control.poll(); // service the control REPL (Fase 6)
 
   uint8_t buf[256];
   uint8_t len = 0;

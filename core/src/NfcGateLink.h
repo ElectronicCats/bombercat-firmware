@@ -1,10 +1,10 @@
 /**
  * BomberCatCore - NfcGateLink
  *
- * Transport for the NFCGate relay: an Arduino Client (WiFiNINA WiFiClient on the
- * BomberCat) plus the NfcGateCodec. It owns the TCP connection to nfcgate-server
- * and the length-prefixed framing; the protobuf encode/decode lives in
- * NfcGateCodec so it can be tested off-device.
+ * Transport for the NFCGate relay: an Arduino Client (WiFiNINA WiFiClient on
+ * the BomberCat) plus the NfcGateCodec. It owns the TCP connection to
+ * nfcgate-server and the length-prefixed framing; the protobuf encode/decode
+ * lives in NfcGateCodec so it can be tested off-device.
  *
  * Taking a Client& (not a concrete WiFiClient) keeps this decoupled from
  * WiFiNINA and lets a test double drive it. WiFi *association* (WiFi.begin) is
@@ -26,7 +26,7 @@
 #include "NfcGateCodec.h"
 
 class NfcGateLink {
- public:
+public:
   // `client` must outlive this link (typically a global WiFiClient).
   explicit NfcGateLink(Client &client) : _c(client) {}
 
@@ -41,11 +41,11 @@ class NfcGateLink {
   void setSession(uint8_t s) { _session = s; }
 
   // Send one APDU as an OP_PSH frame. `source` marks who produced it (READER or
-  // CARD). Defaults to CONTINUATION: an APDU is always a continuation, never the
-  // reader's one-off INITIAL tag config — the real NFCGate app routes an
+  // CARD). Defaults to CONTINUATION: an APDU is always a continuation, never
+  // the reader's one-off INITIAL tag config — the real NFCGate app routes an
   // INITIAL-tagged frame into its daemon config parser instead of transceiving
-  // it, which crashes the app (see RelayEngine forwarding). Returns false if not
-  // connected, the APDU is too large, or the write is short.
+  // it, which crashes the app (see RelayEngine forwarding). Returns false if
+  // not connected, the APDU is too large, or the write is short.
   bool send(NfcSource source, const uint8_t *apdu, size_t len,
             NfcType type = NfcType::CONTINUATION, int64_t timestamp = 0);
 
@@ -69,7 +69,7 @@ class NfcGateLink {
   // up to `bufCap` bytes are copied into `buf` (truncated if larger).
   int receive(NfcSource &source, uint8_t *buf, size_t bufCap, size_t &outLen);
 
- private:
+private:
   void resetRx();
 
   Client &_c;
@@ -87,4 +87,4 @@ class NfcGateLink {
   uint8_t _tx[NFCGATE_MAX_FRAME];
 };
 
-#endif  // BOMBERCAT_CORE_NFCGATELINK_H
+#endif // BOMBERCAT_CORE_NFCGATELINK_H

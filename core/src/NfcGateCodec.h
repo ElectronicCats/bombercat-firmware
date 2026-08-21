@@ -4,8 +4,8 @@
  * Arduino-free codec for the NFCGate wire protocol (protocol @804fa9a,
  * server 4d32cc1 — see proto/UPSTREAM.md). It knows nothing about sockets or
  * WiFi; it only turns APDUs into framed bytes and back. NfcGateLink drives the
- * actual IO over an Arduino Client; keeping the codec here (no <Arduino.h>) lets
- * it be unit-tested on a host against the real server (tools/testserver/).
+ * actual IO over an Arduino Client; keeping the codec here (no <Arduino.h>)
+ * lets it be unit-tested on a host against the real server (tools/testserver/).
  *
  * Wire format (asymmetric framing):
  *   client -> server : [4B length BE][1B session][payload]
@@ -87,6 +87,6 @@ size_t encodeControlFrame(uint8_t session, NfcOpcode op, uint8_t *out,
 bool decodeServerData(const uint8_t *payload, size_t len, ServerData &sd,
                       NfcData &nfc);
 
-}  // namespace NfcGateCodec
+} // namespace NfcGateCodec
 
-#endif  // BOMBERCAT_CORE_NFCGATECODEC_H
+#endif // BOMBERCAT_CORE_NFCGATECODEC_H

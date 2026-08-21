@@ -1,4 +1,4 @@
-void printData(uint8_t* buff, uint8_t lenbuffer, uint8_t cmd) {
+void printData(uint8_t *buff, uint8_t lenbuffer, uint8_t cmd) {
   char tmp[1];
   if (cmd == 1)
     Serial.print("\nCommand: ");
@@ -17,13 +17,14 @@ void printData(uint8_t* buff, uint8_t lenbuffer, uint8_t cmd) {
 }
 
 void emulateNFCID() {
-  if (nfc.CardModeReceive(Cmd, &CmdSize) == 0) {  // Receive command from reader
+  if (nfc.CardModeReceive(Cmd, &CmdSize) == 0) { // Receive command from reader
     printData(Cmd, CmdSize, 1);
     printData(data, sizeof(data), 3);
     Serial.println("\nAttempts = " + String(attempts));
     attempts++;
 
-    nfc.CardModeSend(data, sizeof(data));  // Emulate the dummy data and the NFCID
+    nfc.CardModeSend(data,
+                     sizeof(data)); // Emulate the dummy data and the NFCID
 
     // If Cmd is equal to requestCmd, then the reader is asking for the NFCID
     if (memcmp(Cmd, requestCmd, sizeof(requestCmd)) == 0) {

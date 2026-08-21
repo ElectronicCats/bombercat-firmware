@@ -40,11 +40,10 @@ size_t encodeFrame(uint8_t session, NfcOpcode op, const NfcData &nfc,
   // Serialize the inner NFCData into ServerData.data.
   ServerData sd =
       de_tu_darmstadt_seemoo_nfcgate_network_c2s_ServerData_init_zero;
-  sd.opcode =
-      (de_tu_darmstadt_seemoo_nfcgate_network_c2s_ServerData_Opcode)op;
-  pb_ostream_t ns = pb_ostream_from_buffer(sd.data.bytes, sizeof(sd.data.bytes));
-  if (!pb_encode(&ns,
-                 de_tu_darmstadt_seemoo_nfcgate_network_c2c_NFCData_fields,
+  sd.opcode = (de_tu_darmstadt_seemoo_nfcgate_network_c2s_ServerData_Opcode)op;
+  pb_ostream_t ns =
+      pb_ostream_from_buffer(sd.data.bytes, sizeof(sd.data.bytes));
+  if (!pb_encode(&ns, de_tu_darmstadt_seemoo_nfcgate_network_c2c_NFCData_fields,
                  &nfc)) {
     return 0;
   }
@@ -80,8 +79,7 @@ size_t encodeControlFrame(uint8_t session, NfcOpcode op, uint8_t *out,
 
   ServerData sd =
       de_tu_darmstadt_seemoo_nfcgate_network_c2s_ServerData_init_zero;
-  sd.opcode =
-      (de_tu_darmstadt_seemoo_nfcgate_network_c2s_ServerData_Opcode)op;
+  sd.opcode = (de_tu_darmstadt_seemoo_nfcgate_network_c2s_ServerData_Opcode)op;
   // sd.data left empty: proto3 omits the zero-length bytes field, so the
   // payload is just the opcode tag+value (e.g. OP_SYN -> {0x08, 0x01}).
   pb_ostream_t ps = pb_ostream_from_buffer(out + 5, outCap - 5);
@@ -112,12 +110,11 @@ bool decodeServerData(const uint8_t *payload, size_t len, ServerData &sd,
 
   nfc = de_tu_darmstadt_seemoo_nfcgate_network_c2c_NFCData_init_zero;
   pb_istream_t ns = pb_istream_from_buffer(sd.data.bytes, sd.data.size);
-  if (!pb_decode(&ns,
-                 de_tu_darmstadt_seemoo_nfcgate_network_c2c_NFCData_fields,
+  if (!pb_decode(&ns, de_tu_darmstadt_seemoo_nfcgate_network_c2c_NFCData_fields,
                  &nfc)) {
     return false;
   }
   return true;
 }
 
-}  // namespace NfcGateCodec
+} // namespace NfcGateCodec

@@ -32,7 +32,7 @@ void SerialControl::poll() {
         continue;
       }
       if (_len == 0) {
-        continue;  // ignore empty lines / bare CR-LF
+        continue; // ignore empty lines / bare CR-LF
       }
       _buf[_len] = '\0';
       dispatch(_buf);
@@ -40,10 +40,10 @@ void SerialControl::poll() {
       continue;
     }
     if (_overflow) {
-      continue;  // still swallowing an over-long line
+      continue; // still swallowing an over-long line
     }
     if (_len >= LINE_MAX - 1) {
-      _overflow = true;  // wait for the newline, then error out
+      _overflow = true; // wait for the newline, then error out
       continue;
     }
     _buf[_len++] = c;
@@ -89,13 +89,13 @@ const char *SerialControl::stateName() const {
     return _cb.state();
   }
   switch (_engine.state()) {
-    case RelayEngine::State::Relaying:
-      return "relaying";
-    case RelayEngine::State::Error:
-      return "error";
-    case RelayEngine::State::Idle:
-    default:
-      return "idle";
+  case RelayEngine::State::Relaying:
+    return "relaying";
+  case RelayEngine::State::Error:
+    return "error";
+  case RelayEngine::State::Idle:
+  default:
+    return "idle";
   }
 }
 
@@ -106,15 +106,19 @@ const char *SerialControl::stateName() const {
 // `line` in place (null-terminates the verb).
 static char *splitVerb(char *line) {
   char *p = line;
-  while (*p && *p != ' ') p++;
-  if (*p == '\0') return p;  // no args; points at the terminator
+  while (*p && *p != ' ')
+    p++;
+  if (*p == '\0')
+    return p; // no args; points at the terminator
   *p++ = '\0';
-  while (*p == ' ') p++;
+  while (*p == ' ')
+    p++;
   return p;
 }
 
 void SerialControl::dispatch(char *line) {
-  while (*line == ' ') line++;  // trim leading spaces
+  while (*line == ' ')
+    line++; // trim leading spaces
   char *args = splitVerb(line);
   const char *verb = line;
 
@@ -152,11 +156,11 @@ void SerialControl::dispatch(char *line) {
   } else if (strcmp(verb, "set") == 0) {
     if (handleSet(args)) {
       ok();
-    }  // handleSet emits its own -ERR on failure
+    } // handleSet emits its own -ERR on failure
   } else if (strcmp(verb, "save") == 0) {
     _store.save(_cfg) ? ok() : err("save failed");
   } else if (strcmp(verb, "load") == 0) {
-    _store.load(_cfg);  // populates defaults if none persisted
+    _store.load(_cfg); // populates defaults if none persisted
     ok();
   } else if (strcmp(verb, "clear") == 0) {
     _store.clear() ? ok() : err("clear failed");
@@ -170,7 +174,8 @@ void SerialControl::dispatch(char *line) {
       reason == nullptr ? ok("accepted") : err(reason);
     }
   } else if (strcmp(verb, "stop") == 0) {
-    if (_cb.stop != nullptr) _cb.stop();
+    if (_cb.stop != nullptr)
+      _cb.stop();
     ok();
   } else if (strcmp(verb, "status") == 0) {
     kv("state", stateName());
@@ -185,14 +190,15 @@ void SerialControl::dispatch(char *line) {
     if (_cb.identify == nullptr) {
       err("identify unavailable");
     } else {
-      _cb.identify();  // only ARMS the blink; the sketch's loop() runs it
+      _cb.identify(); // only ARMS the blink; the sketch's loop() runs it
       ok();
     }
   } else if (strcmp(verb, "capture") == 0) {
     // Arm/disarm the APDU capture tap (Fase 8). When on, the engine copies each
     // relayed APDU out as a ":apdu <dir> <ts_ms> <hex>" event on this same
     // stream, which the host `bombercat capture` turns into a pcap for
-    // Wireshark. Off the relay hot path — only a copy of the log we already emit.
+    // Wireshark. Off the relay hot path — only a copy of the log we already
+    // emit.
     if (strcmp(args, "on") == 0) {
       _engine.setCapture(&_io);
       ok("capture on");
@@ -229,14 +235,15 @@ void SerialControl::dispatch(char *line) {
   } else if (strcmp(verb, "reboot") == 0) {
     ok();
     _io.flush();
-    if (_cb.reboot != nullptr) _cb.reboot();
+    if (_cb.reboot != nullptr)
+      _cb.reboot();
   } else {
     err("unknown command");
   }
 }
 
 bool SerialControl::handleSet(char *args) {
-  char *value = splitVerb(args);  // args := key, value := rest of line
+  char *value = splitVerb(args); // args := key, value := rest of line
   const char *key = args;
 
   if (strcmp(key, "ssid") == 0) {

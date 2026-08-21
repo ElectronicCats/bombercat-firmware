@@ -2,5 +2,5 @@
 #define ssidName ""
 #define passWIFI ""
 
-//MQTT Server
+// MQTT Server
 #define mqttServ "test.mosquitto.org"

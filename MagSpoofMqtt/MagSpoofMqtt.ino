@@ -27,21 +27,21 @@
 */
 #include "arduino_secrets.h"
 #include <ArduinoJson.h>
-#include <WiFiNINA.h>
 #include <PubSubClient.h>
+#include <WiFiNINA.h>
 // Update these with values suitable for your network.
 
-const char* ssid = ssidName;
-const char* password = passWIFI;
-const char* mqtt_server = mqttServ;
+const char *ssid = ssidName;
+const char *password = passWIFI;
+const char *mqtt_server = mqttServ;
 
-#define L1         (LED_BUILTIN)  //LED1 indicates activity
+#define L1 (LED_BUILTIN) // LED1 indicates activity
 
-#define PIN_A      (6)   //MagSpoof-1  
-#define PIN_B      (7)   //MagSpoof
+#define PIN_A (6) // MagSpoof-1
+#define PIN_B (7) // MagSpoof
 
-#define NPIN       (5) //Button
-#define CLOCK_US   (500)
+#define NPIN (5) // Button
+#define CLOCK_US (500)
 
 #define BETWEEN_ZERO (53) // 53 zeros between track1 & 2
 
@@ -57,12 +57,8 @@ char tracks[2][128];
 
 char revTrack[41];
 
-const int sublen[] = {
-  32, 48, 48
-};
-const int bitlen[] = {
-  7, 5, 5
-};
+const int sublen[] = {32, 48, 48};
+const int bitlen[] = {7, 5, 5};
 
 unsigned int curTrack = 0;
 int dir;
@@ -73,7 +69,7 @@ int status = WL_IDLE_STATUS;
 PubSubClient client(espClient);
 
 unsigned long lastMsg = 0;
-#define MSG_BUFFER_SIZE  (50)
+#define MSG_BUFFER_SIZE (50)
 char msg[MSG_BUFFER_SIZE];
 int value = 0;
 
@@ -91,7 +87,8 @@ void setup_wifi() {
   if (WiFi.status() == WL_NO_MODULE) {
     Serial.println("Communication with WiFi module failed!");
     // don't continue
-    while (true);
+    while (true)
+      ;
   }
 
   String fv = WiFi.firmwareVersion();
@@ -103,7 +100,8 @@ void setup_wifi() {
   while (status != WL_CONNECTED) {
     Serial.print("Attempting to connect to SSID: ");
     Serial.println(ssid);
-    // Connect to WPA/WPA2 network. Change this line if using open or WEP network:
+    // Connect to WPA/WPA2 network. Change this line if using open or WEP
+    // network:
     status = WiFi.begin(ssid, password);
 
     Serial.println("");
@@ -113,38 +111,41 @@ void setup_wifi() {
   }
 }
 
-void callback(char* topic, byte* payload, unsigned int length) {
+void callback(char *topic, byte *payload, unsigned int length) {
 
-  //Converts the payload into a character array and adds the termination character
+  // Converts the payload into a character array and adds the termination
+  // character
   char message[length + 1];
-  strncpy(message, (char*)payload, length);
+  strncpy(message, (char *)payload, length);
   message[length] = '\0';
 
-  //Searching for these specific characters in the payload
-  char* questionMark =  strchr(message, '?'); //End Sentinel of Track 1
-  char* semicolon = strchr(message, ';'); //Start Sentinel of Track 2
+  // Searching for these specific characters in the payload
+  char *questionMark = strchr(message, '?'); // End Sentinel of Track 1
+  char *semicolon = strchr(message, ';');    // Start Sentinel of Track 2
 
   /*Verify that the payload contains:
     '%': Start Sentinel of Track 1
     '?': End sentinel of Track 1
-    And confirms the position of the End Sentinel of Track 1 and Start Sentinel of Track 2*/
-  if (message[0] != '%' || message[length - 1] != '?' || questionMark == NULL || semicolon == NULL || questionMark >= semicolon){
+    And confirms the position of the End Sentinel of Track 1 and Start Sentinel
+    of Track 2*/
+  if (message[0] != '%' || message[length - 1] != '?' || questionMark == NULL ||
+      semicolon == NULL || questionMark >= semicolon) {
     Serial.println("Invalid message received in the Mag topic. Ignoring...");
     return;
   }
 
-  //Track 1: from '%' to the first '?' (Start and End Sentinels, respectively)
+  // Track 1: from '%' to the first '?' (Start and End Sentinels, respectively)
   int track1Length = questionMark - message + 1;
   strncpy(tracks[0], message, track1Length);
   tracks[0][track1Length] = '\0';
 
-  //Track 2: from ';' to the second '?' (Start and End Sentinels, respectively)
+  // Track 2: from ';' to the second '?' (Start and End Sentinels, respectively)
   int track2Start = semicolon - message;
   int track2End = length - track2Start;
   strncpy(tracks[1], message + track2Start, track2End);
   tracks[1][track2End] = '\0';
 
-  //Show the tracks in the Serial Monitor
+  // Show the tracks in the Serial Monitor
   Serial.println();
   Serial.println("Track 1:");
   Serial.println(tracks[0]);
@@ -152,7 +153,6 @@ void callback(char* topic, byte* payload, unsigned int length) {
   Serial.println(tracks[1]);
 
   magspoof();
-
 }
 void reconnect() {
   // Loop until we're reconnected
@@ -183,13 +183,14 @@ void setup() {
   pinMode(PIN_B, OUTPUT);
   pinMode(L1, OUTPUT);
   pinMode(NPIN, INPUT_PULLUP);
-  pinMode(13, OUTPUT);     // Initialize the BUILTIN_LED pin as an output
+  pinMode(13, OUTPUT); // Initialize the BUILTIN_LED pin as an output
 
   setup_wifi();
   client.setServer(mqtt_server, 1883);
   client.setCallback(callback);
   Serial.begin(9600);
-  while (!Serial);
+  while (!Serial)
+    ;
 
   // blink to show we started up
   blink(L1, 200, 2);
@@ -226,7 +227,8 @@ void reverseTrack(int track) {
   track--; // index 0
   dir = 0;
 
-  while (revTrack[i++] != '\0');
+  while (revTrack[i++] != '\0')
+    ;
   i--;
   while (i--)
     for (int j = bitlen[track] - 1; j >= 0; j--)
@@ -243,13 +245,11 @@ void playTrack(int track) {
   for (int i = 0; i < 25; i++)
     playBit(0);
 
-  for (int i = 0; tracks[track][i] != '\0'; i++)
-  {
+  for (int i = 0; tracks[track][i] != '\0'; i++) {
     crc = 1;
     tmp = tracks[track][i] - sublen[track];
 
-    for (int j = 0; j < bitlen[track] - 1; j++)
-    {
+    for (int j = 0; j < bitlen[track] - 1; j++) {
       crc ^= tmp & 1;
       lrc ^= (tmp & 1) << j;
       playBit(tmp & 1);
@@ -261,8 +261,7 @@ void playTrack(int track) {
   // finish calculating and send last "byte" (LRC)
   tmp = lrc;
   crc = 1;
-  for (int j = 0; j < bitlen[track] - 1; j++)
-  {
+  for (int j = 0; j < bitlen[track] - 1; j++) {
     crc ^= tmp & 1;
     playBit(tmp & 1);
     tmp >>= 1;
@@ -270,8 +269,7 @@ void playTrack(int track) {
   playBit(crc);
 
   // if track 1, play 2nd track in reverse (like swiping back?)
-  if (track == 0)
-  {
+  if (track == 0) {
     // if track 1, also play track 2 in reverse
     // zeros in between
     for (int i = 0; i < BETWEEN_ZERO; i++)
@@ -287,7 +285,6 @@ void playTrack(int track) {
 
   digitalWrite(PIN_A, LOW);
   digitalWrite(PIN_B, LOW);
-
 }
 
 // stores track for reverse usage later
@@ -296,40 +293,28 @@ void storeRevTrack(int track) {
   track--; // index 0
   dir = 0;
 
-
-for (i = 0; tracks[track][i] != '\0'; i++)
-  {
+  for (i = 0; tracks[track][i] != '\0'; i++) {
     crc = 1;
     tmp = tracks[track][i] - sublen[track];
 
-    for (int j = 0; j < bitlen[track] - 1; j++)
-    {
+    for (int j = 0; j < bitlen[track] - 1; j++) {
       crc ^= tmp & 1;
       lrc ^= (tmp & 1) << j;
-      tmp & 1 ?
-      (revTrack[i] |= 1 << j) :
-      (revTrack[i] &= ~(1 << j));
+      tmp & 1 ? (revTrack[i] |= 1 << j) : (revTrack[i] &= ~(1 << j));
       tmp >>= 1;
     }
-    crc ?
-    (revTrack[i] |= 1 << 4) :
-    (revTrack[i] &= ~(1 << 4));
+    crc ? (revTrack[i] |= 1 << 4) : (revTrack[i] &= ~(1 << 4));
   }
 
   // finish calculating and send last "byte" (LRC)
   tmp = lrc;
   crc = 1;
-  for (int j = 0; j < bitlen[track] - 1; j++)
-  {
+  for (int j = 0; j < bitlen[track] - 1; j++) {
     crc ^= tmp & 1;
-    tmp & 1 ?
-    (revTrack[i] |= 1 << j) :
-    (revTrack[i] &= ~(1 << j));
+    tmp & 1 ? (revTrack[i] |= 1 << j) : (revTrack[i] &= ~(1 << j));
     tmp >>= 1;
   }
-  crc ?
-  (revTrack[i] |= 1 << 4) :
-  (revTrack[i] &= ~(1 << 4));
+  crc ? (revTrack[i] |= 1 << 4) : (revTrack[i] &= ~(1 << 4));
 
   i++;
   revTrack[i] = '\0';
@@ -347,5 +332,4 @@ void loop() {
     reconnect();
   }
   client.loop();
-
 }

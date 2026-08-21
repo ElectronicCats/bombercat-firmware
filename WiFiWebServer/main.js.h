@@ -1,4 +1,4 @@
-const char* main_js = R"=====(// Uncomment this to test on a local environment
+const char *main_js = R"=====(// Uncomment this to test on a local environment
 // let pollMode = "POLL MODE: Remote MIFARE card activated";
 // let nfcID;
 // let sensRes;

@@ -22,18 +22,19 @@
   Distributed as-is; no warranty is given.
 */
 
-#define L1 (LED_BUILTIN)   // LED1
-#define PIN_A (6)          // MagSpoof-1
-#define PIN_B (7)          // MagSpoofZF
-#define NPIN (5)           // Button
-#define CLOCK_US (500)     // 500us clock, it simulates the speed of the magnetic card swiping
-#define BETWEEN_ZERO (53)  // 53 zeros between track1 & 2
+#define L1 (LED_BUILTIN) // LED1
+#define PIN_A (6)        // MagSpoof-1
+#define PIN_B (7)        // MagSpoofZF
+#define NPIN (5)         // Button
+#define CLOCK_US                                                               \
+  (500) // 500us clock, it simulates the speed of the magnetic card swiping
+#define BETWEEN_ZERO (53) // 53 zeros between track1 & 2
 #define TRACKS (2)
 #define DEBUGCAT
 
-char tracks[2][128];  // 2 tracks, 128 chars each (max)
+char tracks[2][128]; // 2 tracks, 128 chars each (max)
 
-char revTrack[41];  // 40 chars + null
+char revTrack[41]; // 40 chars + null
 
 const int sublen[] = {32, 48, 48};
 
@@ -43,7 +44,8 @@ unsigned int curTrack = 0;
 int dir;
 
 void setupTracks() {
-  String track1 = "%B123456781234567^LASTNAME/FIRST^YYMMSSSDDDDDDDDDDDDDDDDDDDDDDDDD?";
+  String track1 =
+      "%B123456781234567^LASTNAME/FIRST^YYMMSSSDDDDDDDDDDDDDDDDDDDDDDDDD?";
   String track2 = ";123456781234567=112220100000000000000?";
 
   // Copy the tracks into the char arrays using strcpy
@@ -95,7 +97,7 @@ void playBit(int sendBit) {
 // when reversing
 void reverseTrack(int track) {
   int i = 0;
-  track--;  // index 0
+  track--; // index 0
   dir = 0;
 
   while (revTrack[i++] != '\0')
@@ -110,7 +112,7 @@ void reverseTrack(int track) {
 void playTrack(int track) {
   int tmp, crc, lrc = 0;
   dir = 0;
-  track--;  // index 0
+  track--; // index 0
   // enable H-bridge and LED
   // digitalWrite(ENABLE_PIN, HIGH);
 
@@ -163,7 +165,7 @@ void playTrack(int track) {
 // stores track for reverse usage later
 void storeRevTrack(int track) {
   int i, tmp, crc, lrc = 0;
-  track--;  // index 0
+  track--; // index 0
   dir = 0;
 
   for (i = 0; tracks[track][i] != '\0'; i++) {
@@ -216,13 +218,12 @@ void setup() {
   blink(L1, 200, 2);
   setupTracks();
 
-  String track1 = "%B4784556940589010^HOGAN/PAUL      ^08043210000000725000000?";
+  String track1 =
+      "%B4784556940589010^HOGAN/PAUL      ^08043210000000725000000?";
   String track2 = ";4784556940589010=08043210000072500000?";
   // Uncomment to modify tracks
   // updateTracks(track1, track2);
 
   Serial.println("Press the MagSpoof button");
 }
-void loop() {
-  magspoof();
-}
+void loop() { magspoof(); }

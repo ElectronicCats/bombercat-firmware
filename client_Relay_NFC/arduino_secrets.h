@@ -2,5 +2,5 @@
 #define SECRET_SSID ""
 #define SECRET_PASS ""
 
-//MQTT Server
+// MQTT Server
 #define mqttServ ""

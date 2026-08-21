@@ -48,7 +48,7 @@ void playBit(int sendBit) {
 // when reversing
 void reverseTrack(int track) {
   int i = 0;
-  track--;  // index 0
+  track--; // index 0
   dir = 0;
 
   while (revTrack[i++] != '\0')
@@ -63,7 +63,7 @@ void reverseTrack(int track) {
 void playTrack(int track) {
   int tmp, crc, lrc = 0;
   dir = 0;
-  track--;  // index 0
+  track--; // index 0
   // enable H-bridge and LED
   // digitalWrite(ENABLE_PIN, HIGH);
 
@@ -116,7 +116,7 @@ void playTrack(int track) {
 // stores track for reverse usage later
 void storeRevTrack(int track) {
   int i, tmp, crc, lrc = 0;
-  track--;  // index 0
+  track--; // index 0
   dir = 0;
 
   for (i = 0; tracks[track][i] != '\0'; i++) {

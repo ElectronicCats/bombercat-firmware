@@ -8,7 +8,7 @@ message NFCData {
 		READER = 0;
 		CARD   = 1;
 	}
-	
+
 	enum DataType {
         INITIAL      = 0;
         CONTINUATION = 1;
@@ -16,10 +16,10 @@ message NFCData {
 
 	// If data is coming from a NFC Card or a NFC Reader
 	DataSource data_source = 1;
-	
+
 	// If data is initial card data or continuation
 	DataType     data_type = 2;
-	
+
 	// Unix timestamp in millis
 	int64        timestamp = 4;
 

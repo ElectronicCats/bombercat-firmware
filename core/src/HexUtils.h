@@ -23,6 +23,6 @@ String toString(const uint8_t *data, size_t len);
 // Prefer this on the hot path to keep RAM pressure low on the RP2040.
 void print(Print &out, const uint8_t *data, size_t len);
 
-}  // namespace HexUtils
+} // namespace HexUtils
 
-#endif  // BOMBERCAT_CORE_HEXUTILS_H
+#endif // BOMBERCAT_CORE_HEXUTILS_H

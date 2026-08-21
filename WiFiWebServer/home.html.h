@@ -1,4 +1,4 @@
-const char* home_html = R"=====(<!DOCTYPE html>
+const char *home_html = R"=====(<!DOCTYPE html>
 <html lang="en">
 
 <head>

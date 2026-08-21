@@ -1,4 +1,4 @@
-const char* success_html = R"=====(<!DOCTYPE html>
+const char *success_html = R"=====(<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -17,6 +17,6 @@ const char* success_html = R"=====(<!DOCTYPE html>
             <button class="primary-button">Continue</button>
         </div>
     </form>
-    </section>  
+    </section>
 </body>
 </html>)=====";

@@ -1,18 +1,14 @@
 #include "Debug.h"
 
-void Debug::setEnabled(bool enabled) {
-  this->enabled = enabled;
-}
+void Debug::setEnabled(bool enabled) { this->enabled = enabled; }
 
-bool Debug::isEnabled() {
-  return this->enabled;
-}
+bool Debug::isEnabled() { return this->enabled; }
 
 void Debug::waitForSerialConnection() {
   if (!this->enabled) {
     return;
   }
-  while (!Serial) {  // Wait for the serial connection to be established
+  while (!Serial) { // Wait for the serial connection to be established
     delay(1);
   }
 }
@@ -167,7 +163,8 @@ void Debug::println(String message, String message2, String message3) {
   }
 }
 
-void Debug::print(String message, String message2, String message3, String message4) {
+void Debug::print(String message, String message2, String message3,
+                  String message4) {
   if (this->enabled) {
     Serial.print(message);
     Serial.print(message2);
@@ -176,7 +173,8 @@ void Debug::print(String message, String message2, String message3, String messa
   }
 }
 
-void Debug::println(String message, String message2, String message3, String message4) {
+void Debug::println(String message, String message2, String message3,
+                    String message4) {
   if (this->enabled) {
     Serial.print(message);
     Serial.print(message2);

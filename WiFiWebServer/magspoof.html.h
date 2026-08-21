@@ -1,4 +1,4 @@
-const char* magspoof_html = R"=====(<!DOCTYPE html>
+const char *magspoof_html = R"=====(<!DOCTYPE html>
 <html lang="en">
 
 <head>

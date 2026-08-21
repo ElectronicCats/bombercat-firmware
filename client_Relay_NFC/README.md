@@ -20,4 +20,3 @@ to
 ```
 strcpy(delim, "-"); // strtok_r needs a null-terminated string
 ```
-

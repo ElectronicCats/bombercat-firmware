@@ -1,9 +1,9 @@
 // Compile-time relay configuration fallback for the NFCGate sketch.
 //
 // These values are used ONLY when there is no configuration persisted in flash
-// (ConfigStore). Once the control CLI (docs/NFCGATE_PLAN.md Fase 6) writes a config,
-// the persisted values win and this file is ignored. Filling it in lets the
-// READER role be tested before the CLI exists.
+// (ConfigStore). Once the control CLI (docs/NFCGATE_PLAN.md Fase 6) writes a
+// config, the persisted values win and this file is ignored. Filling it in lets
+// the READER role be tested before the CLI exists.
 
 // --- WiFi ---
 #define SECRET_SSID ""

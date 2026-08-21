@@ -1,4 +1,4 @@
-const char* styles_css = R"=====(:root {
+const char *styles_css = R"=====(:root {
     --main-logo-background: #1A5157;
     --text-section: #333333;
     --fill-input-field: #F8F9FC;

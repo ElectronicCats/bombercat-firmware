@@ -3,8 +3,8 @@
   by Francisco Torres, Electronic Cats (https://electroniccats.com/)
   Date: 14/04/2023
 
-  This example demonstrates how to use a Web server for the BomberCat by Electronic Cats
-  https://github.com/ElectronicCats/BomberCat
+  This example demonstrates how to use a Web server for the BomberCat by
+Electronic Cats https://github.com/ElectronicCats/BomberCat
 
   Development environment specifics:
   IDE: Visual Studio Code + Arduino CLI Version 0.32.2
@@ -21,7 +21,7 @@
   please buy us a round!
   Distributed as-is; no warranty is given.
 ***********************************************************************************/
-#include <Preferences.h>  // https://github.com/ElectronicCats/Preferences
+#include <Preferences.h> // https://github.com/ElectronicCats/Preferences
 #include <SPI.h>
 #include <WiFiNINA.h>
 #include <ezButton.h>
@@ -56,7 +56,7 @@ String defaultPassword = "password";
 int port = 80;
 WiFiServer server(port);
 int status = WL_IDLE_STATUS;
-int webRequest = HOME_URL;  // Default URL
+int webRequest = HOME_URL; // Default URL
 bool rebootFlag = false;
 unsigned long rebootTimer = 0;
 
@@ -80,7 +80,7 @@ void runServer();
 void showPageContent(WiFiClient client, const char *pageContent);
 
 void setup() {
-  Serial.begin(9600);  // Initialize serial communications with the PC
+  Serial.begin(9600); // Initialize serial communications with the PC
 
 #ifdef DEBUG
   debug.setEnabled(true);
@@ -88,7 +88,7 @@ void setup() {
   debug.setEnabled(false);
 #endif
 
-  debug.waitForSerialConnection();  // Only if debugging is enabled
+  debug.waitForSerialConnection(); // Only if debugging is enabled
 
   setupPreferences();
   // factoryReset();
@@ -125,8 +125,9 @@ void loop() {
   static unsigned long lastTime = millis();
   debug.setEnabled(preferences.getBool("debug", false));
 
-  runServer();       // Listen for incoming clients and serve the page content when connected
-  handleRequests();  // Handle the requests from the client
+  runServer(); // Listen for incoming clients and serve the page content when
+               // connected
+  handleRequests(); // Handle the requests from the client
 }
 
 void setupPreferences() {
@@ -139,7 +140,8 @@ void setupPreferences() {
   unsigned int rebootCounter = preferences.getUInt("rebootCounter", 0);
 
   rebootCounter++;
-  debug.println("The BomberCat has been rebooted " + String(rebootCounter) + " times");
+  debug.println("The BomberCat has been rebooted " + String(rebootCounter) +
+                " times");
 
   // Store the rebootCounter to the Preferences
   preferences.putUInt("rebootCounter", rebootCounter);
@@ -213,7 +215,8 @@ void setupWiFi() {
 
 void printWifiStatus() {
   debug.println("SSID: " + String(WiFi.SSID()));
-  debug.println("Password: ", preferences.getString("password", defaultPassword));
+  debug.println("Password: ",
+                preferences.getString("password", defaultPassword));
   debug.print("To access the web interface, go to: http://");
   debug.println(WiFi.localIP());
   debug.println("Signal strength (RSSI): " + String(WiFi.RSSI()) + " dBm");
@@ -221,7 +224,8 @@ void printWifiStatus() {
 
 /// @brief Decode an URL-encoded string
 /// @param url
-/// @author https://arduino.stackexchange.com/questions/18007/simple-url-decoding?newreg=32c11952781c413592b3e837a3785e84
+/// @author
+/// https://arduino.stackexchange.com/questions/18007/simple-url-decoding?newreg=32c11952781c413592b3e837a3785e84
 /// @return String
 String decodeURL(char *url) {
   // Check if the URL starts with "%B" and return as it is.
@@ -278,7 +282,8 @@ String decodeURL(char *url) {
 }
 
 void setupTracks() {
-  String track1 = "%B123456781234567^LASTNAME/FIRST^YYMMSSSDDDDDDDDDDDDDDDDDDDDDDDDD?";
+  String track1 =
+      "%B123456781234567^LASTNAME/FIRST^YYMMSSSDDDDDDDDDDDDDDDDDDDDDDDDD?";
   String track2 = ";123456781234567=112220100000000000000?";
 
   track1 = decodeURL((char *)track1.c_str());
@@ -297,8 +302,10 @@ void setupTracks() {
 
 void updateTracks(String url) {
   // Store tracks from url into String variables
-  String track1 = url.substring(url.indexOf("track1=") + 7, url.indexOf("&track2="));
-  String track2 = url.substring(url.indexOf("track2=") + 7, url.indexOf("&button="));
+  String track1 =
+      url.substring(url.indexOf("track1=") + 7, url.indexOf("&track2="));
+  String track2 =
+      url.substring(url.indexOf("track2=") + 7, url.indexOf("&button="));
 
   // Decode urls
   track1 = decodeURL((char *)track1.c_str());
@@ -313,42 +320,42 @@ void loadPageContent(WiFiClient client) {
   static int currentHTML;
 
   switch (webRequest) {
-    case CSS_URL:
-      showPageContent(client, styles_css);
-      webRequest = currentHTML;
-      break;
-    case JAVASCRIPT_URL:
-      showPageContent(client, main_js);
-      webRequest = currentHTML;
-      break;
-    case LOGIN_URL:
-      showPageContent(client, login_html);
-      currentHTML = LOGIN_URL;
-      break;
-    case HOME_URL:
-      showPageContent(client, home_html);
-      currentHTML = HOME_URL;
-      break;
-    case INFO_URL:
-      showPageContent(client, info_html);
-      currentHTML = INFO_URL;
-      break;
-    case MAGSPOOF_URL:
-      showPageContent(client, magspoof_html);
-      currentHTML = MAGSPOOF_URL;
-      break;
-    case NFC_URL:
-      showPageContent(client, nfc_html);
-      currentHTML = NFC_URL;
-      break;
-    case CONFIG_URL:
-      showPageContent(client, config_html);
-      currentHTML = CONFIG_URL;
-      break;
-    default:
-      showPageContent(client, login_html);
-      currentHTML = LOGIN_URL;
-      break;
+  case CSS_URL:
+    showPageContent(client, styles_css);
+    webRequest = currentHTML;
+    break;
+  case JAVASCRIPT_URL:
+    showPageContent(client, main_js);
+    webRequest = currentHTML;
+    break;
+  case LOGIN_URL:
+    showPageContent(client, login_html);
+    currentHTML = LOGIN_URL;
+    break;
+  case HOME_URL:
+    showPageContent(client, home_html);
+    currentHTML = HOME_URL;
+    break;
+  case INFO_URL:
+    showPageContent(client, info_html);
+    currentHTML = INFO_URL;
+    break;
+  case MAGSPOOF_URL:
+    showPageContent(client, magspoof_html);
+    currentHTML = MAGSPOOF_URL;
+    break;
+  case NFC_URL:
+    showPageContent(client, nfc_html);
+    currentHTML = NFC_URL;
+    break;
+  case CONFIG_URL:
+    showPageContent(client, config_html);
+    currentHTML = CONFIG_URL;
+    break;
+  default:
+    showPageContent(client, login_html);
+    currentHTML = LOGIN_URL;
+    break;
   }
 }
 
@@ -379,8 +386,10 @@ void handleRequests() {
     magspoof();
   }
 
-  // Run the NFC detect tags function every DETECT_TAGS_DELAY_MS milliseconds READ_ATTEMPTS times
-  if (millis() - detectTagsTime > DETECT_TAGS_DELAY_MS && webRequest == NFC_URL && runDetectTags) {
+  // Run the NFC detect tags function every DETECT_TAGS_DELAY_MS milliseconds
+  // READ_ATTEMPTS times
+  if (millis() - detectTagsTime > DETECT_TAGS_DELAY_MS &&
+      webRequest == NFC_URL && runDetectTags) {
     detectTagsTime = millis();
     nfcExecutionCounter++;
 
@@ -403,7 +412,8 @@ void handleRequests() {
   }
 
   // Run emulateNFCID function after EMULATE_NFCID_DELAY_MS milliseconds
-  if (millis() - emulateNFCIDTimer > EMULATE_NFCID_DELAY_MS && emulateNFCFlag && webRequest == NFC_URL) {
+  if (millis() - emulateNFCIDTimer > EMULATE_NFCID_DELAY_MS && emulateNFCFlag &&
+      webRequest == NFC_URL) {
     emulateNFCID();
   }
 
@@ -417,7 +427,8 @@ void handleRequests() {
 
 /// @brief Handles the URL parameters
 /// @param url The URL to handle
-/// @details This function handles the URL parameters and updates the tracks and button values
+/// @details This function handles the URL parameters and updates the tracks and
+/// button values
 void handleURLParameters(String url) {
   // ? is the start of request parameters
   if (url.startsWith("/config.html?")) {
@@ -429,7 +440,8 @@ void handleURLParameters(String url) {
 
     index = url.indexOf("btnSaveWiFiConfig=");
     if (index != -1) {
-      btnSaveWiFiConfig = url.substring(index + 18, url.indexOf("&ssid="));  // true or false
+      btnSaveWiFiConfig =
+          url.substring(index + 18, url.indexOf("&ssid=")); // true or false
     }
 
     index = url.indexOf("ssid=");
@@ -470,7 +482,8 @@ void handleURLParameters(String url) {
       preferences.putBool("debug", false);
     }
   } else if (url.startsWith("/nfc.html?")) {
-    String btnRunDetectTags = url.substring(url.indexOf("runDetectTags=") + 14, url.length());
+    String btnRunDetectTags =
+        url.substring(url.indexOf("runDetectTags=") + 14, url.length());
     String btnClear = url.substring(url.indexOf("clear=") + 6, url.length());
     String btnEmulateNFC = "";
     int index = url.indexOf("emulateState=");
@@ -533,9 +546,12 @@ void showPageContent(WiFiClient client, const char *pageContent) {
     client.println("let sensRes = `" + sensRes + "`;");
     client.println("let selRes = `" + selRes + "`;");
     client.println("let nfcID = `" + nfcID + "`;");
-    client.println("let nfcDiscoverySuccess = " + String(nfcDiscoverySuccess ? "true" : "false") + ";");
-    client.println("let ssid = `" + preferences.getString("ssid", defaultSSID) + "`;");
-    client.println("let password = `" + preferences.getString("password", defaultPassword) + "`;");
+    client.println("let nfcDiscoverySuccess = " +
+                   String(nfcDiscoverySuccess ? "true" : "false") + ";");
+    client.println("let ssid = `" + preferences.getString("ssid", defaultSSID) +
+                   "`;");
+    client.println("let password = `" +
+                   preferences.getString("password", defaultPassword) + "`;");
   }
 
   // Create a temporary string to hold the page content
@@ -561,38 +577,43 @@ void showPageContent(WiFiClient client, const char *pageContent) {
     // Send the temporary string to the client
     client.print(tempString);
     if (lastString == true)
-      break;  // Exit the loop if we've reached the end of the page content
+      break; // Exit the loop if we've reached the end of the page content
   }
 
-  client.println("");  // Send a blank line to indicate the end of the page content
+  client.println(
+      ""); // Send a blank line to indicate the end of the page content
 }
 
 void runServer() {
-  WiFiClient client = server.available();  // listen for incoming clients
+  WiFiClient client = server.available(); // listen for incoming clients
 
-  if (client) {  // if you get a client,
+  if (client) { // if you get a client,
     unsigned long speedTestTime = millis();
-    String currentLine = "";  // make a String to hold incoming data from the client
+    String currentLine =
+        ""; // make a String to hold incoming data from the client
 
-    while (client.connected()) {  // loop while the client's connected
-      if (client.available()) {   // if there's bytes to read from the client,
-        char c = client.read();   // read a byte, then
+    while (client.connected()) { // loop while the client's connected
+      if (client.available()) {  // if there's bytes to read from the client,
+        char c = client.read();  // read a byte, then
         // debug.write(c);  // print it out the serial monitor
 
-        if (c == '\n') {  // if the byte is a newline character
+        if (c == '\n') { // if the byte is a newline character
           if (currentLine.length() == 0) {
             loadPageContent(client);
             break;
           } else {
-            currentLine = "";  // if you got a newline, then clear currentLine:
+            currentLine = ""; // if you got a newline, then clear currentLine:
           }
-        } else if (c != '\r') {  // if you got anything else but a carriage return character,
-          currentLine += c;      // add it to the end of the currentLine
+        } else if (c != '\r') { // if you got anything else but a carriage
+                                // return character,
+          currentLine += c;     // add it to the end of the currentLine
         }
 
         // Only check for URL if it's a GET <url options> HTTP
-        if (currentLine.startsWith("GET /") && currentLine.endsWith("HTTP/1.1")) {
-          String url = currentLine.substring(4, currentLine.indexOf("HTTP/1.1"));
+        if (currentLine.startsWith("GET /") &&
+            currentLine.endsWith("HTTP/1.1")) {
+          String url =
+              currentLine.substring(4, currentLine.indexOf("HTTP/1.1"));
           // debug.println("\nRequest: " + currentLine);
           // debug.println("URL: " + url);
 
@@ -603,6 +624,7 @@ void runServer() {
     }
     client.stop();
     // debug.println("client disconnected");
-    // debug.println("Time to run server: " + String(millis() - speedTestTime) + " ms");
+    // debug.println("Time to run server: " + String(millis() - speedTestTime) +
+    // " ms");
   }
 }

@@ -1,4 +1,4 @@
-const char* nfc_html = R"=====(<!DOCTYPE html>
+const char *nfc_html = R"=====(<!DOCTYPE html>
 <html lang="en">
 
 <head>
