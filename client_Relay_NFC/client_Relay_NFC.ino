@@ -51,6 +51,7 @@ TDBStore store(&blockDevice);
 
 // #define DEBUG
 #define SERIALCOMMAND_HARDWAREONLY
+#define BOMBERCAT_FW_VERSION "1.0.0"
 #define PERIOD 10000
 #define CLIENT 0
 
@@ -1101,9 +1102,25 @@ void clean() {
   commandlarge = 0;
 }
 
+// --- BomberCat control protocol (bombercat-tools) --------------------------
+// Registered as SerialCommand verbs so they share the one Serial reader (SCmd)
+// instead of racing it. Emit the leading-marker responses the host CLI expects;
+// any other line is log noise the CLI ignores.
+void bc_ping() { Serial.println("+OK bombercat"); }
+void bc_info() {
+  Serial.println(":fw " BOMBERCAT_FW_VERSION);
+  Serial.println(":firmware client_Relay_NFC");
+  Serial.println(":state idle");
+  Serial.println("+OK");
+}
+void bc_identify() {
+  Serial.println("+OK");
+  blink(L1, 150, 6); // brief visual identification so a CLI ID maps to a board
+}
+
 void setup() {
 
-  Serial.begin(9600);
+  Serial.begin(115200);
   if (debug) {
     while (!Serial)
       ;
@@ -1185,6 +1202,9 @@ void setup() {
   }
 
   // Setup callbacks for SerialCommand commands
+  SCmd.addCommand("ping", bc_ping);         // bombercat-tools discovery
+  SCmd.addCommand("info", bc_info);         // bombercat device info
+  SCmd.addCommand("identify", bc_identify); // bombercat identify
   SCmd.addCommand("help", help);
   SCmd.addCommand("set_h", set_h);
   SCmd.addCommand("free_h", free_h);

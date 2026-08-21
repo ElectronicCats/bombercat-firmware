@@ -15,6 +15,10 @@
  */
 
 #include "Electroniccats_PN7150.h"
+#include <BomberCatControl.h>
+
+#define BOMBERCAT_FW_VERSION "1.0.0"
+
 #define PN7150_IRQ (11)
 #define PN7150_VEN (13)
 #define PN7150_ADDR (0x28)
@@ -25,12 +29,16 @@ Electroniccats_PN7150
                  // pins 11 (IRQ) and 13 (VEN) and using the default I2C address
                  // 0x28,specify PN7150 or PN7160 in constructor
 
+// BomberCat serial-control REPL (ping/info/identify) so bombercat-tools can
+// discover and identify this board over USB serial.
+BomberCatControl control(Serial, BOMBERCAT_FW_VERSION, "DetectTags");
+
 // Function prototypes
 String getHexRepresentation(const byte *data, const uint32_t numBytes);
 void displayCardInfo();
 
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200);
   while (!Serial)
     ;
   Serial.println("Detect NFC tags with PN7150/60");
@@ -56,9 +64,13 @@ void setup() {
   }
   nfc.startDiscovery(); // NCI Discovery mode
   Serial.println("Waiting for an Card ...");
+
+  control.begin(); // announce readiness to the host CLI
 }
 
 void loop() {
+  control.poll(); // service host CLI commands (ping/info/identify)
+
   if (nfc.isTagDetected()) {
     displayCardInfo();
 

@@ -38,6 +38,9 @@ Electronic Cats https://github.com/ElectronicCats/BomberCat
 #include "main.js.h"
 #include "nfc.html.h"
 #include "styles.css.h"
+#include <BomberCatControl.h>
+
+#define BOMBERCAT_FW_VERSION "1.0.0"
 
 // #define DEBUG
 
@@ -61,6 +64,9 @@ bool rebootFlag = false;
 unsigned long rebootTimer = 0;
 
 Debug debug;
+// BomberCat serial-control REPL (ping/info/identify) for bombercat-tools.
+// Shares the Serial port with Debug; the CLI ignores non-marker log lines.
+BomberCatControl control(Serial, BOMBERCAT_FW_VERSION, "WiFiWebServer");
 Preferences preferences;
 ezButton button(NPIN);
 
@@ -80,7 +86,7 @@ void runServer();
 void showPageContent(WiFiClient client, const char *pageContent);
 
 void setup() {
-  Serial.begin(9600); // Initialize serial communications with the PC
+  Serial.begin(115200); // Initialize serial communications with the PC
 
 #ifdef DEBUG
   debug.setEnabled(true);
@@ -119,10 +125,13 @@ void setup() {
   setupMagspoof();
   setupTracks();
   setupNFC();
+
+  control.begin(); // announce readiness to the host CLI
 }
 
 void loop() {
   static unsigned long lastTime = millis();
+  control.poll(); // service host CLI commands (ping/info/identify)
   debug.setEnabled(preferences.getBool("debug", false));
 
   runServer(); // Listen for incoming clients and serve the page content when

@@ -36,7 +36,8 @@ public:
   struct Callbacks {
     // Start a short visual identification (LED blink) so the user can match a
     // CLI device ID to a board on the desk. If null, BomberCatControl blinks
-    // LED_BUILTIN itself. Must return promptly; the blink is driven from poll().
+    // LED_BUILTIN itself. Must return promptly; the blink is driven from
+    // poll().
     void (*identify)() = nullptr;
     // Control-plane state name reported by `info` ("idle"|"running"|...). If
     // null, `info` reports "idle".
@@ -44,7 +45,8 @@ public:
   };
 
   // `io` must outlive the control object (typically a global in the sketch).
-  // `fwVersion` and `fwName` are reported by `info` (e.g. "1.0.0", "DetectTags").
+  // `fwVersion` and `fwName` are reported by `info` (e.g. "1.0.0",
+  // "DetectTags").
   BomberCatControl(Stream &io, const char *fwVersion, const char *fwName);
 
   void setCallbacks(const Callbacks &cb) { _cb = cb; }

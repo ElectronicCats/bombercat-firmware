@@ -22,6 +22,10 @@
   Distributed as-is; no warranty is given.
 */
 
+#include <BomberCatControl.h>
+
+#define BOMBERCAT_FW_VERSION "1.0.0"
+
 #define L1 (LED_BUILTIN) // LED1
 #define PIN_A (6)        // MagSpoof-1
 #define PIN_B (7)        // MagSpoofZF
@@ -204,13 +208,16 @@ void magspoof() {
   }
 }
 
+// BomberCat serial-control REPL (ping/info/identify) for bombercat-tools.
+BomberCatControl control(Serial, BOMBERCAT_FW_VERSION, "magspoof");
+
 void setup() {
   pinMode(PIN_A, OUTPUT);
   pinMode(PIN_B, OUTPUT);
   pinMode(L1, OUTPUT);
   pinMode(NPIN, INPUT_PULLUP);
 
-  Serial.begin(9600);
+  Serial.begin(115200);
   while (!Serial)
     ;
 
@@ -225,5 +232,10 @@ void setup() {
   // updateTracks(track1, track2);
 
   Serial.println("Press the MagSpoof button");
+
+  control.begin(); // announce readiness to the host CLI
 }
-void loop() { magspoof(); }
+void loop() {
+  control.poll(); // service host CLI commands (ping/info/identify)
+  magspoof();
+}

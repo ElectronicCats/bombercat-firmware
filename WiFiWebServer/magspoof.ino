@@ -167,7 +167,7 @@ void setupMagspoof() {
   pinMode(L1, OUTPUT);
   pinMode(NPIN, INPUT_PULLUP);
 
-  Serial.begin(9600);
+  Serial.begin(115200);
 
   // blink to show we started up
   blink(L1, 200, 2);
