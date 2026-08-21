@@ -1,0 +1,115 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 Electronic Cats
+#
+# SPDX-License-Identifier: MIT
+#
+# Compila cada firmware del BomberCat (RP2040) a .uf2 con arduino-cli.
+# En cada release publicado, adjunta los .uf2 y descriptions.json como
+# assets, de modo que un flasher (estilo catnip/flasher.py) pueda listar,
+# describir y descargar cualquier firmware.
+
+name: build-firmware
+
+on:
+  push:
+  pull_request:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+# Debe coincidir con flash_bombercat.sh
+env:
+  FQBN: electroniccats:mbed_rp2040:bombercat
+  CORE: electroniccats:mbed_rp2040
+  BOARDS_INDEX_URL: https://raw.githubusercontent.com/ElectronicCats/Arduino_Boards_Index/master/package_electroniccats_index.json
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install arduino-cli
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install core (Electronic Cats Mbed OS RP2040)
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls "$BOARDS_INDEX_URL"
+          arduino-cli core update-index
+          arduino-cli core install "$CORE"
+
+      - name: Install libraries
+        run: |
+          arduino-cli lib update-index
+          # Librerías del Library Manager (ver flash_bombercat.sh)
+          arduino-cli lib install \
+            "PubSubClient" \
+            "WiFiNINA" \
+            "Electronic Cats PN7150" \
+            "ArduinoJson" \
+            "ezButton"
+          # Librería que no está en el Library Manager: se instala por git.
+          # NO instalar ElectronicCats/Preferences: el fork de WiFiNINA ya
+          # trae WiFiPreferences.h y duplicarla rompe el enlazado.
+          arduino-cli config set library.enable_unsafe_install true
+          arduino-cli lib install --git-url https://github.com/kroimon/Arduino-SerialCommand.git
+
+      - name: Build firmwares -> .uf2
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          # Herramienta del core para convertir .elf -> .uf2
+          ELF2UF2="$(find "$HOME/.arduino15/packages/electroniccats/tools/rp2040tools" \
+                      -name elf2uf2 -type f 2>/dev/null | sort -V | tail -n1)"
+          [ -x "$ELF2UF2" ] || { echo "::error::elf2uf2 no encontrado"; exit 1; }
+
+          # Librería local del repo (BomberCatCore), usada por NFCGate.
+          CORE_LIB_ARG=()
+          [ -f core/library.properties ] && CORE_LIB_ARG=(--library core)
+
+          # Firmwares = carpetas raíz con <nombre>/<nombre>.ino (excluye core, docs y ocultos).
+          fail=0
+          for d in */; do
+            name="${d%/}"
+            case "$name" in core|docs|.github|.git) continue ;; esac
+            sketch="$name/$name.ino"
+            [ -f "$sketch" ] || continue
+
+            echo "::group::Compilando $name"
+            out="build/$name"
+            if arduino-cli compile --fqbn "$FQBN" --output-dir "$out" \
+                 "${CORE_LIB_ARG[@]}" "$name"; then
+              elf="$(find "$out" -maxdepth 1 -name '*.elf' | head -n1)"
+              if [ -n "$elf" ] && "$ELF2UF2" "$elf" "dist/$name.uf2"; then
+                echo "OK -> dist/$name.uf2"
+              else
+                echo "::error::Falló elf2uf2 para $name"; fail=1
+              fi
+            else
+              echo "::error::Falló la compilación de $name"; fail=1
+            fi
+            echo "::endgroup::"
+          done
+
+          cp descriptions.json dist/ 2>/dev/null || echo "::warning::descriptions.json no encontrado"
+          echo "--- Artefactos ---"; ls -l dist
+          exit $fail
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bombercat-firmware-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Attach firmwares to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.uf2
+            dist/descriptions.json

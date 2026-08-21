@@ -1,0 +1,40 @@
+{
+    "bombercat": [
+        {
+            "filename": "DetectTags.uf2",
+            "description": "NFC tag reader for the BomberCat's onboard PN7150. It continuously polls the RF field and, whenever a contactless tag (ISO14443-A/B, ISO15693, Felica, etc.) enters range, it detects the technology, reads the tag's unique identifier (UID) and prints it over USB serial. It is a lightweight diagnostic/learning firmware to confirm the NFC front-end works and to capture the UID of physical cards, with no relay or emulation logic."
+        },
+        {
+            "filename": "magspoof.uf2",
+            "description": "Basic MagSpoof magnetic-stripe emulator for BomberCat. It drives the on-board H-bridge coil to reproduce the electromagnetic field a real magnetic card generates when swiped, letting a standard magstripe reader pick up the emulated tracks wirelessly. The track data is compiled into the sketch; on a button press the firmware replays it. Intended as the reference example for magstripe emulation and for demonstrating MagSpoof on the BomberCat hardware."
+        },
+        {
+            "filename": "MagspoofCVSAttack.uf2",
+            "description": "MagSpoof variant that replays a sequence of magnetic-stripe tracks loaded from a CSV dataset (data.csv). Rather than emulating a single card, it iterates over multiple track records, making it suitable for research demonstrations such as the well-known gift-card/PIN-space 'CVS' style attack where many candidate values are emitted in turn. It reuses the same coil-driving MagSpoof technique to transmit each record to a magstripe reader."
+        },
+        {
+            "filename": "MagSpoofMqtt.uf2",
+            "description": "Networked MagSpoof firmware that receives magnetic-stripe track data remotely over WiFi using the MQTT protocol. The BomberCat connects to a WiFi network (via the onboard WiFiNINA/ESP32 module) and subscribes to an MQTT broker; incoming messages carry the tracks to emulate, which are then transmitted through the MagSpoof coil. It enables remote/automated triggering of magstripe emulation from any MQTT publisher. Requires WiFi and broker credentials in arduino_secrets.h."
+        },
+        {
+            "filename": "NFCGate.uf2",
+            "description": "Role-selectable NFCGate relay endpoint built on the BomberCatCore library. It relays APDUs between a physical contactless card and a remote terminal over WiFi/TCP through an nfcgate-server, implementing both ends: the READER role (replays commands received over TCP to the physical card and returns the response) and the CARD/HCE role (reads the terminal's command over RF, forwards it over TCP and injects the peer's response back). The device boots into a SerialControl REPL (ping/info/set/save/run/status/stop/identify) so a host CLI can configure WiFi and relay parameters over USB serial without APDUs traveling on the serial link; with RELAY_AUTOSTART it can also start standalone from the persisted configuration."
+        },
+        {
+            "filename": "host_Relay_NFC.uf2",
+            "description": "Legacy MQTT-based NFC relay endpoint, READER side. It configures the onboard PN7150 in POLL mode to read a physical contactless card, captures the terminal-side APDUs and publishes them to an MQTT broker over WiFi (WiFiNINA), while subscribing to the peer's responses to complete the relay loop with client_Relay_NFC. Superseded by NFCGate.uf2, which unifies both relay roles on the BomberCatCore library over TCP; kept for historical reference. Requires WiFi and broker credentials in arduino_secrets.h and a patched Arduino-SerialCommand library."
+        },
+        {
+            "filename": "client_Relay_NFC.uf2",
+            "description": "Legacy MQTT-based NFC relay endpoint, CARD/HCE side. It puts the onboard PN7150 into emulation mode to present itself as a contactless card to a real terminal, forwards the terminal's APDU commands to an MQTT broker over WiFi (WiFiNINA) and injects the peer's responses back over RF, pairing with host_Relay_NFC to bridge a card and terminal across the network. Includes a Visa MSD emulation path and SerialCommand modes (mode_nfc/mode_ms). Superseded by NFCGate.uf2, which unifies both relay roles on the BomberCatCore library over TCP; kept for historical reference. Requires WiFi and broker credentials in arduino_secrets.h and a patched Arduino-SerialCommand library."
+        },
+        {
+            "filename": "WiFiWebServer.uf2",
+            "description": "All-in-one firmware that turns the BomberCat into a self-hosted WiFi access point with a web interface. Serving HTML/JS/CSS pages directly from the RP2040, it lets the user control the device from a browser: read NFC tags, clone a card's ID, and configure and trigger MagSpoof magnetic-stripe emulation, all without a serial console. It bundles the DetectTags, CloneNFCID and MagSpoof features behind login and configuration pages, making it the most user-friendly way to operate the BomberCat in the field."
+        },
+        {
+            "filename": "ESP32SerialPassthroughFlash.uf2",
+            "description": "Utility firmware that turns the RP2040 into a transparent serial passthrough to the BomberCat's onboard ESP32/NINA module. It bridges USB serial to the ESP32's UART so the user can send AT commands, watch bootloader output, or flash new firmware onto the ESP32 (e.g. with Espressif's Flash Download Tool) through the RP2040. It is a maintenance/recovery tool for updating or debugging the WiFi co-processor, not an attack or NFC firmware."
+        }
+    ]
+}
