@@ -1,11 +1,3 @@
-/*** ⚠️ OBSOLETO / LEGACY ────────────────────────────────────────────────────
- * Sketch Relay NFC (rol READER, transporte MQTT). Reemplazado por
- * ../NFCGate/NFCGate.ino, que unifica los roles READER y CARD/HCE en un solo
- * sketch basado en la librería core/ (RelayEngine + NfcGateLink + ConfigStore +
- * SerialControl) y es el código por defecto para Relay. Se conserva aquí solo
- * por su valor histórico; no usar en nuevos despliegues. Ver ../README.md.
- * ───────────────────────────────────────────────────────────────────────────*/
-
 /************************************************************
   Example for read NFC card via MQTT version for BomberCat
   by Andres Sabas, Electronic Cats (https://electroniccats.com/)

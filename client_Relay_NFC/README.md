@@ -1,8 +1,3 @@
-> ⚠️ **OBSOLETO / LEGACY.** Sketch Relay NFC (rol CARD/HCE (tarjeta)) sobre MQTT.
-> Reemplazado por [`../../NFCGate/NFCGate.ino`](../../NFCGate/NFCGate.ino), que
-> unifica ambos roles en un solo sketch basado en `core/` y es el Relay por
-> defecto. Conservado solo por su histórico. Ver [`../README.md`](../README.md).
-
 # Changes required Arduino Serial Command
 
 For this example to work properly, you must make changes to the library [Arduino Serial Command](https://github.com/kroimon/Arduino-SerialCommand)
