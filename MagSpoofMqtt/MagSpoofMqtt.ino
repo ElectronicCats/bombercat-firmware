@@ -182,7 +182,7 @@ void reconnect() {
 }
 
 // BomberCat serial-control REPL (ping/info/identify) for bombercat-tools.
-BomberCatControl control(Serial, BOMBERCAT_FW_VERSION, "MagSpoofMqtt");
+BomberCatControl control(Serial, BOMBERCAT_FW_VERSION, "magspoofmqtt");
 
 void setup() {
   pinMode(PIN_A, OUTPUT);

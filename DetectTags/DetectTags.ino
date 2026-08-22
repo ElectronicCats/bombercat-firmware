@@ -31,7 +31,7 @@ Electroniccats_PN7150
 
 // BomberCat serial-control REPL (ping/info/identify) so bombercat-tools can
 // discover and identify this board over USB serial.
-BomberCatControl control(Serial, BOMBERCAT_FW_VERSION, "DetectTags");
+BomberCatControl control(Serial, BOMBERCAT_FW_VERSION, "detecttags");
 
 // Function prototypes
 String getHexRepresentation(const byte *data, const uint32_t numBytes);

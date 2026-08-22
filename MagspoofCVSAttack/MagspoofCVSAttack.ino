@@ -223,7 +223,7 @@ void magspoof() {
 }
 
 // BomberCat serial-control REPL (ping/info/identify) for bombercat-tools.
-BomberCatControl control(Serial, BOMBERCAT_FW_VERSION, "MagspoofCVSAttack");
+BomberCatControl control(Serial, BOMBERCAT_FW_VERSION, "magspoofcvsattack");
 
 void setup() {
   Serial.begin(115200);

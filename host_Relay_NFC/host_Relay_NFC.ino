@@ -790,7 +790,7 @@ String getHexRepresentation(const byte *data, const uint32_t numBytes) {
 void bc_ping() { Serial.println("+OK bombercat"); }
 void bc_info() {
   Serial.println(":fw " BOMBERCAT_FW_VERSION);
-  Serial.println(":firmware host_Relay_NFC");
+  Serial.println(":fw_name host_relay_nfc");
   Serial.println(":state idle");
   Serial.println("+OK");
 }

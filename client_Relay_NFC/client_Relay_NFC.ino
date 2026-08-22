@@ -1109,7 +1109,7 @@ void clean() {
 void bc_ping() { Serial.println("+OK bombercat"); }
 void bc_info() {
   Serial.println(":fw " BOMBERCAT_FW_VERSION);
-  Serial.println(":firmware client_Relay_NFC");
+  Serial.println(":fw_name client_relay_nfc");
   Serial.println(":state idle");
   Serial.println("+OK");
 }
