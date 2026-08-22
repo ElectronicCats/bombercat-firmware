@@ -23,14 +23,14 @@
  *
  * Commands:
  *   ping                      -> +OK bombercat            (handshake /
- * discovery) info                      -> :fw :role :ssid :server :port
- * :session :state +OK get <key>                 -> :<key> <value> +OK (key as
- * in `set`) set <key> <value...>      -> +OK / -ERR   keys: ssid pass server
- * port session role  (value = rest of line; role is reader|card, port/session
- * numeric) save                      -> +OK / -ERR   persist current config to
- * flash load                      -> +OK          reload config from flash
- *   clear                     -> +OK / -ERR   erase persisted config
- *   run                       -> +OK accepted / -ERR <reason>
+ * discovery) info                      -> :fw :fw_name :role :ssid :server
+ * :port :session :state +OK get <key>                 -> :<key> <value> +OK
+ * (key as in `set`) set <key> <value...>      -> +OK / -ERR   keys: ssid pass
+ * server port session role  (value = rest of line; role is reader|card,
+ * port/session numeric) save                      -> +OK / -ERR   persist
+ * current config to flash load                      -> +OK          reload
+ * config from flash clear                     -> +OK / -ERR   erase persisted
+ * config run                       -> +OK accepted / -ERR <reason>
  *                                Non-blocking: only KICKS OFF the bring-up and
  *                                replies immediately. The relay then advances
  *                                through WiFi -> NFC -> TCP -> SYN in the
@@ -92,9 +92,12 @@ public:
 
   // `io`, `store`, `cfg` and `engine` must outlive the control object (all are
   // typically globals in the sketch). `fwVersion` is reported by `info`/`get
-  // fw`.
+  // fw`. `fwName` is the firmware identity (registry id, e.g. "nfcgate")
+  // reported by `info`/`get fw_name`, so the host CLI can name which REPL
+  // firmware is flashed instead of inferring it (GENERALIZE_CLI_PLAN §2.5).
   SerialControl(Stream &io, ConfigStore &store, RelayConfig &cfg,
-                RelayEngine &engine, const char *fwVersion);
+                RelayEngine &engine, const char *fwVersion,
+                const char *fwName = "nfcgate");
 
   void setCallbacks(const Callbacks &cb) { _cb = cb; }
 
@@ -124,6 +127,7 @@ private:
   RelayConfig &_cfg;
   RelayEngine &_engine;
   const char *_fw;
+  const char *_name;
   Callbacks _cb;
 
   static const size_t LINE_MAX = 160; // ssid/pass up to 63 each + verb + space
