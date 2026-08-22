@@ -66,7 +66,7 @@ unsigned long rebootTimer = 0;
 Debug debug;
 // BomberCat serial-control REPL (ping/info/identify) for bombercat-tools.
 // Shares the Serial port with Debug; the CLI ignores non-marker log lines.
-BomberCatControl control(Serial, BOMBERCAT_FW_VERSION, "WiFiWebServer");
+BomberCatControl control(Serial, BOMBERCAT_FW_VERSION, "nfcgate_wifiwebserver");
 Preferences preferences;
 ezButton button(NPIN);
 
@@ -190,9 +190,9 @@ void setupWiFi() {
   // Check for the WiFi module
   if (WiFi.status() == WL_NO_MODULE) {
     debug.println("Communication with WiFi module failed!");
-    // don't continue
-    while (true)
-      ;
+    // Non-fatal: keep the control REPL (ping/info/identify) alive so the board
+    // stays discoverable by bombercat-tools even when WiFi is unavailable.
+    return;
   }
 
   // Set a static IP address
@@ -213,9 +213,11 @@ void setupWiFi() {
   status = WiFi.beginAP(ssid.c_str(), password.c_str());
   if (status != WL_AP_LISTENING) {
     debug.println("Creating access point failed");
-    // don't continue
-    while (true)
-      ;
+    // Non-fatal: a failed AP (e.g. outdated onboard NINA WiFi firmware, which
+    // returns WL_AP_FAILED) must not brick the board. Bail out of WiFi setup so
+    // setup() finishes and the control REPL runs; the web UI is unavailable
+    // until the AP works, but the board stays discoverable/identifiable.
+    return;
   }
 
   server.begin();
