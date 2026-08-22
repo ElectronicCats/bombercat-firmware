@@ -97,7 +97,7 @@ void BomberCatControl::dispatch(char *line) {
     ok("bombercat");
   } else if (strcmp(verb, "info") == 0) {
     kv("fw", _fw);
-    kv("firmware", _name);
+    kv("fw_name", _name);
     kv("state", _cb.state != nullptr ? _cb.state() : "idle");
     ok();
   } else if (strcmp(verb, "identify") == 0) {

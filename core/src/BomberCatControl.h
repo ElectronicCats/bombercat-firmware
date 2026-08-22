@@ -8,7 +8,7 @@
  * and identify a board:
  *
  *   ping      -> +OK bombercat            (auto-detection / handshake)
- *   info      -> :fw :firmware :state +OK (bombercat device info)
+ *   info      -> :fw :fw_name :state +OK (bombercat device info / status)
  *   identify  -> +OK  (+ LED blink)       (bombercat identify)
  *   <other>   -> -ERR unknown command
  *
