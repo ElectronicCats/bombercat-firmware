@@ -38,7 +38,7 @@ String getHexRepresentation(const byte *data, const uint32_t numBytes);
 String getHexCompact(const byte *data, const uint32_t numBytes);
 const char *getProtocolName(unsigned char protocol);
 void emitTagEvent(uint32_t tsMs, const char *tech, const char *protocol,
-                   const String &uidHex);
+                  const String &uidHex, const String &extra = "");
 void displayCardInfo();
 
 void setup() {
@@ -174,9 +174,10 @@ const char *getProtocolName(unsigned char protocol) {
 
 // Structured event consumed by bombercat-tools' TagParser: once it sees one
 // ":tag" line it stops parsing the legacy prose below permanently, so this
-// is emitted alongside (not instead of) the existing Serial prints.
+// is emitted alongside (not instead of) the existing Serial prints. `extra`
+// is optional trailing "k=v" pairs (space-separated), e.g. "attrib=1122".
 void emitTagEvent(uint32_t tsMs, const char *tech, const char *protocol,
-                   const String &uidHex) {
+                  const String &uidHex, const String &extra) {
   Serial.print(":tag ");
   Serial.print(tsMs);
   Serial.print(' ');
@@ -184,7 +185,12 @@ void emitTagEvent(uint32_t tsMs, const char *tech, const char *protocol,
   Serial.print(' ');
   Serial.print(protocol);
   Serial.print(' ');
-  Serial.println(uidHex);
+  Serial.print(uidHex);
+  if (extra.length() > 0) {
+    Serial.print(' ');
+    Serial.print(extra);
+  }
+  Serial.println();
 }
 
 void displayCardInfo() { // Funtion in charge to show the card/s in te field
@@ -232,32 +238,58 @@ void displayCardInfo() { // Funtion in charge to show the card/s in te field
                                  nfc.remoteDevice.getNFCIDLen()));
       break;
 
-    case (nfc.tech.PASSIVE_NFCB):
+    case (nfc.tech.PASSIVE_NFCB): {
       Serial.println("\tTechnology: NFC-B");
+      const unsigned char *sensRes = nfc.remoteDevice.getSensRes();
+      unsigned char sensResLen = nfc.remoteDevice.getSensResLen();
       Serial.print("\tSENS RES = ");
-      Serial.println(getHexRepresentation(nfc.remoteDevice.getSensRes(),
-                                          nfc.remoteDevice.getSensResLen()));
+      Serial.println(getHexRepresentation(sensRes, sensResLen));
 
+      const unsigned char *attribRes = nfc.remoteDevice.getAttribRes();
+      unsigned char attribResLen = nfc.remoteDevice.getAttribResLen();
       Serial.println("\tAttrib RES = ");
-      Serial.println(getHexRepresentation(nfc.remoteDevice.getAttribRes(),
-                                          nfc.remoteDevice.getAttribResLen()));
+      Serial.println(getHexRepresentation(attribRes, attribResLen));
 
-      // Firmware prints no UID for NFC-B (see TagParser.pretty_uid).
-      emitTagEvent(millis(), "NFC-B", protocolName, "-");
+      // SENSB_RES (ISO14443-3B ATQB): byte 0 = 0x50, bytes 1-4 = PUPI
+      // (NFCID0) - the closest thing Type B has to a UID. Confirmed against
+      // Electroniccats_PN7150::RemoteDevice::setInfo() (RemoteDevice.cpp),
+      // which copies the raw ATQB frame into SensRes untouched.
+      String pupiHex = "-";
+      if (sensResLen >= 5) {
+        Serial.print("\tPUPI = ");
+        Serial.println(getHexRepresentation(&sensRes[1], 4));
+        pupiHex = getHexCompact(&sensRes[1], 4);
+      }
+
+      String extra = "attrib=" + getHexCompact(attribRes, attribResLen);
+      emitTagEvent(millis(), "NFC-B", protocolName, pupiHex, extra);
       break;
+    }
 
-    case (nfc.tech.PASSIVE_NFCF):
+    case (nfc.tech.PASSIVE_NFCF): {
       Serial.println("\tTechnology: NFC-F");
+      const unsigned char *sensRes = nfc.remoteDevice.getSensRes();
+      unsigned char sensResLen = nfc.remoteDevice.getSensResLen();
       Serial.print("\tSENS RES = ");
-      Serial.println(getHexRepresentation(nfc.remoteDevice.getSensRes(),
-                                          nfc.remoteDevice.getSensResLen()));
+      Serial.println(getHexRepresentation(sensRes, sensResLen));
 
+      bool is212 = (nfc.remoteDevice.getBitRate() == 1);
       Serial.print("\tBitrate = ");
-      Serial.println((nfc.remoteDevice.getBitRate() == 1) ? "212" : "424");
+      Serial.println(is212 ? "212" : "424");
 
-      // Firmware prints no UID for NFC-F (see TagParser.pretty_uid).
-      emitTagEvent(millis(), "NFC-F", protocolName, "-");
+      // SENSF_RES (JIS X6319-4): byte 0 = response code, bytes 1-8 = NFCID2
+      // (IDm) - FeliCa's UID equivalent. Same setInfo() source as above.
+      String idmHex = "-";
+      if (sensResLen >= 9) {
+        Serial.print("\tIDm = ");
+        Serial.println(getHexRepresentation(&sensRes[1], 8));
+        idmHex = getHexCompact(&sensRes[1], 8);
+      }
+
+      String extra = is212 ? "bitrate=212" : "bitrate=424";
+      emitTagEvent(millis(), "NFC-F", protocolName, idmHex, extra);
       break;
+    }
 
     case (nfc.tech.PASSIVE_NFCV):
       Serial.println("\tTechnology: NFC-V");
