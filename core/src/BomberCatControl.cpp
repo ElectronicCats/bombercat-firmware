@@ -91,7 +91,7 @@ void BomberCatControl::dispatch(char *line) {
   while (*line == ' ')
     line++;
   char *verb = line;
-  (void)splitVerb(line); // this REPL takes no arguments; verb is enough
+  char *args = splitVerb(line);
 
   if (strcmp(verb, "ping") == 0) {
     ok("bombercat");
@@ -108,7 +108,9 @@ void BomberCatControl::dispatch(char *line) {
     }
     ok();
   } else {
-    err("unknown command");
+    if (_cb.command == nullptr || !_cb.command(verb, args)) {
+      err("unknown command");
+    }
   }
 }
 

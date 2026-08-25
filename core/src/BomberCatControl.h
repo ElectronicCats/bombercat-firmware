@@ -10,7 +10,9 @@
  *   ping      -> +OK bombercat            (auto-detection / handshake)
  *   info      -> :fw :fw_name :state +OK (bombercat device info / status)
  *   identify  -> +OK  (+ LED blink)       (bombercat identify)
- *   <other>   -> -ERR unknown command
+ *   <other>   -> dispatched to the sketch-provided Callbacks::command hook, if
+ *                any (the sketch must emit its own +OK/-ERR terminator); if the
+ *                hook is null or returns false, -ERR unknown command
  *
  * Unlike core/src/SerialControl.h this class has NO dependency on ConfigStore /
  * RelayEngine / NfcGateLink, so any sketch can add it without pulling in the
@@ -32,7 +34,7 @@
 
 class BomberCatControl {
 public:
-  // Optional hooks the sketch provides. Both may be null.
+  // Optional hooks the sketch provides. All may be null.
   struct Callbacks {
     // Start a short visual identification (LED blink) so the user can match a
     // CLI device ID to a board on the desk. If null, BomberCatControl blinks
@@ -42,6 +44,10 @@ public:
     // Control-plane state name reported by `info` ("idle"|"running"|...). If
     // null, `info` reports "idle".
     const char *(*state)() = nullptr;
+    // Verbo no reconocido por el REPL base. El sketch responde por su cuenta
+    // (debe emitir SU PROPIO terminador +OK/-ERR) y devuelve true.
+    // Devolver false -> el REPL emite "-ERR unknown command".
+    bool (*command)(const char *verb, char *args) = nullptr;
   };
 
   // `io` must outlive the control object (typically a global in the sketch).
@@ -74,7 +80,7 @@ private:
   const char *_name;
   Callbacks _cb;
 
-  static const size_t LINE_MAX = 64;
+  static const size_t LINE_MAX = 192;
   char _buf[LINE_MAX];
   size_t _len = 0;
   bool _overflow = false;
