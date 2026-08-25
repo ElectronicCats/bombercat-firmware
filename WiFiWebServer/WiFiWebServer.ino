@@ -40,7 +40,7 @@ Electronic Cats https://github.com/ElectronicCats/BomberCat
 #include "styles.css.h"
 #include <BomberCatControl.h>
 
-#define BOMBERCAT_FW_VERSION "1.0.0"
+#define BOMBERCAT_FW_VERSION "1.1.1.0"
 
 // #define DEBUG
 

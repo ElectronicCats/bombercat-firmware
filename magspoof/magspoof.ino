@@ -24,7 +24,7 @@
 
 #include <BomberCatControl.h>
 
-#define BOMBERCAT_FW_VERSION "1.0.0"
+#define BOMBERCAT_FW_VERSION "1.1.1.0"
 
 #define L1 (LED_BUILTIN) // LED1
 #define PIN_A (6)        // MagSpoof-1

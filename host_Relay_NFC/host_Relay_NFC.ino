@@ -35,7 +35,7 @@
 
 // #define DEBUG
 #define SERIALCOMMAND_HARDWAREONLY
-#define BOMBERCAT_FW_VERSION "1.0.0"
+#define BOMBERCAT_FW_VERSION "1.1.1.0"
 #define PERIOD 10000
 #define HOST 0
 #define HMAX 42

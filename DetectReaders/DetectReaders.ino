@@ -31,7 +31,7 @@
 #include "Electroniccats_PN7150.h"
 #include <BomberCatControl.h>
 
-#define BOMBERCAT_FW_VERSION "1.0.0"
+#define BOMBERCAT_FW_VERSION "1.1.1.0"
 
 #define PN7150_IRQ (11)
 #define PN7150_VEN (13)
@@ -229,14 +229,13 @@ void handleReaderDetected() {
 
   // --- Fingerprint + structured event --------------------------------------
   String aidHex;
-  const char *label =
-      (firstApduLen > 0) ? classifyFirstApdu(firstApdu, firstApduLen, aidHex)
-                         : "unknown";
+  const char *label = (firstApduLen > 0)
+                          ? classifyFirstApdu(firstApdu, firstApduLen, aidHex)
+                          : "unknown";
 
   String extra = "intf=" + String(interfaceName);
-  extra += " apdu=" +
-           (firstApduLen > 0 ? getHexCompact(firstApdu, firstApduLen)
-                             : String("-"));
+  extra += " apdu=" + (firstApduLen > 0 ? getHexCompact(firstApdu, firstApduLen)
+                                        : String("-"));
   if (aidHex.length() > 0) {
     extra += " aid=" + aidHex;
   }
@@ -468,18 +467,15 @@ const char *classifyFirstApdu(const byte *apdu, uint32_t len, String &aidHex) {
     const char *label;
   };
 
-  static const uint8_t PPSE_2PAY[] = {'2', 'P', 'A', 'Y', '.', 'S',
-                                      'Y', 'S', '.', 'D', 'D', 'F',
-                                      '0', '1'};
-  static const uint8_t PPSE_1PAY[] = {'1', 'P', 'A', 'Y', '.', 'S',
-                                      'Y', 'S', '.', 'D', 'D', 'F',
-                                      '0', '1'};
+  static const uint8_t PPSE_2PAY[] = {'2', 'P', 'A', 'Y', '.', 'S', 'Y',
+                                      'S', '.', 'D', 'D', 'F', '0', '1'};
+  static const uint8_t PPSE_1PAY[] = {'1', 'P', 'A', 'Y', '.', 'S', 'Y',
+                                      'S', '.', 'D', 'D', 'F', '0', '1'};
   static const uint8_t AID_VISA[] = {0xA0, 0x00, 0x00, 0x00, 0x03, 0x10, 0x10};
   static const uint8_t AID_MASTERCARD[] = {0xA0, 0x00, 0x00, 0x00,
                                            0x04, 0x10, 0x10};
   static const uint8_t RID_AMEX[] = {0xA0, 0x00, 0x00, 0x00, 0x00, 0x25};
-  static const uint8_t AID_NDEF[] = {0xD2, 0x76, 0x00, 0x00,
-                                     0x85, 0x01, 0x01};
+  static const uint8_t AID_NDEF[] = {0xD2, 0x76, 0x00, 0x00, 0x85, 0x01, 0x01};
 
   static const Pattern PATTERNS[] = {
       {PPSE_2PAY, sizeof(PPSE_2PAY), "emv-payment"},

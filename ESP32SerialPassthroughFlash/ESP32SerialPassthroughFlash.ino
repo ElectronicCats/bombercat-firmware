@@ -29,7 +29,7 @@
 // BomberCat firmware version. This maintenance tool bridges USB<->ESP32 UART,
 // so it deliberately does NOT implement the serial control REPL (it would
 // corrupt the passthrough); only the version macro is exposed for consistency.
-#define BOMBERCAT_FW_VERSION "1.0.0"
+#define BOMBERCAT_FW_VERSION "1.1.1.0"
 
 // The pin used on the Arduino board. Important: must be 3.3V GPIO pins, or use
 // voltage level shifter

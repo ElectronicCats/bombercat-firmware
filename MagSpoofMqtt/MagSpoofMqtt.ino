@@ -31,7 +31,7 @@
 #include <PubSubClient.h>
 #include <WiFiNINA.h>
 
-#define BOMBERCAT_FW_VERSION "1.0.0"
+#define BOMBERCAT_FW_VERSION "1.1.1.0"
 // Update these with values suitable for your network.
 
 const char *ssid = ssidName;
