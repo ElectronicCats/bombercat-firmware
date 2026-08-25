@@ -61,6 +61,10 @@ void setupTracks() {
   Serial.println(tracks[0]);
   Serial.print("Track 2: ");
   Serial.println(tracks[1]);
+
+  // Keep revTrack in sync so playTrack(1)'s reverseTrack(2) has valid data
+  // instead of replaying whatever was in the (zero-initialized) buffer.
+  storeRevTrack(2);
 }
 
 void updateTracks(String track1, String track2) {
@@ -72,6 +76,8 @@ void updateTracks(String track1, String track2) {
   Serial.println(tracks[0]);
   Serial.print("Track 2: ");
   Serial.println(tracks[1]);
+
+  storeRevTrack(2);
 }
 
 void blink(int pin, int msdelay, int times) {
@@ -202,10 +208,85 @@ void storeRevTrack(int track) {
 void magspoof() {
   if (digitalRead(NPIN) == 0) {
     Serial.println("Activating MagSpoof...");
-    playTrack(1 + (curTrack++ % 2));
+    int track = 1 + (curTrack++ % 2);
+    playTrack(track);
+    emitMagEvent(millis(), track);
     blink(L1, 150, 3);
     delay(400);
   }
+}
+
+// Structured event consumed by bombercat-tools, same conventions as :tag/
+// :reader: ":mag <ts_ms> <track>", one per reproduction regardless of origin
+// (command or physical button).
+void emitMagEvent(uint32_t tsMs, int track) {
+  Serial.print(":mag ");
+  Serial.print(tsMs);
+  Serial.print(' ');
+  Serial.println(track);
+}
+
+// Serial-control command hook for magplay/magset/magget
+// (IMPLEMENTATION_PLAN_MagSpoof.md sec 4). Emits its own +OK/-ERR terminator
+// and returns true when it handled the verb; returning false lets the core
+// REPL answer "-ERR unknown command" instead.
+static bool handleCommand(const char *verb, char *args) {
+  if (strcmp(verb, "magplay") == 0) {
+    int track;
+    if (*args == '\0') {
+      track = 1 + (curTrack++ % 2);
+    } else if (strcmp(args, "1") == 0) {
+      track = 1;
+    } else if (strcmp(args, "2") == 0) {
+      track = 2;
+    } else {
+      Serial.println("-ERR bad track");
+      return true;
+    }
+    playTrack(track);
+    emitMagEvent(millis(), track);
+    blink(L1, 150, 3);
+    Serial.print("+OK played ");
+    Serial.println(track);
+    return true;
+  }
+
+  if (strcmp(verb, "magset") == 0) {
+    if ((args[0] != '1' && args[0] != '2') || args[1] != ' ') {
+      Serial.println("-ERR bad track");
+      return true;
+    }
+    int track = args[0] - '0';
+    char *data = args + 2;
+    size_t len = strlen(data);
+    if (len > 126) {
+      Serial.println("-ERR track too long");
+      return true;
+    }
+    char expectedStart = (track == 1) ? '%' : ';';
+    if (len < 3 || data[0] != expectedStart || data[len - 1] != '?') {
+      Serial.println("-ERR bad track");
+      return true;
+    }
+    strcpy(tracks[track - 1], data);
+    Serial.print("+OK track ");
+    Serial.print(track);
+    Serial.print(" set (");
+    Serial.print(len);
+    Serial.println(" chars)");
+    return true;
+  }
+
+  if (strcmp(verb, "magget") == 0) {
+    Serial.print(":t1 ");
+    Serial.println(tracks[0]);
+    Serial.print(":t2 ");
+    Serial.println(tracks[1]);
+    Serial.println("+OK");
+    return true;
+  }
+
+  return false;
 }
 
 // BomberCat serial-control REPL (ping/info/identify) for bombercat-tools.
@@ -233,6 +314,9 @@ void setup() {
 
   Serial.println("Press the MagSpoof button");
 
+  BomberCatControl::Callbacks cb;
+  cb.command = handleCommand;
+  control.setCallbacks(cb);
   control.begin(); // announce readiness to the host CLI
 }
 void loop() {
