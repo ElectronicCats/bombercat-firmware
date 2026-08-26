@@ -54,6 +54,22 @@ const int bitlen[] = {7, 5, 5};
 unsigned int curTrack = 0;
 int dir;
 
+// Which track the physical NPIN button reproduces: 0 alternates 1 <-> 2 (the
+// historical behaviour), 1 or 2 pin it to that single track. Set over the REPL
+// with `magbtn`; RAM-only like the tracks themselves, so a reset restores the
+// alternating default.
+unsigned int buttonTrack = 0;
+
+// Wire/report name of the current button mode, shared by `magbtn` and
+// `magget` so both always spell it the same way.
+static const char *buttonModeName() {
+  if (buttonTrack == 1)
+    return "1";
+  if (buttonTrack == 2)
+    return "2";
+  return "alt";
+}
+
 void setupTracks() {
   String track1 =
       "%B123456781234567^LASTNAME/FIRST^YYMMSSSDDDDDDDDDDDDDDDDDDDDDDDDD?";
@@ -218,7 +234,7 @@ void storeRevTrack(int track) {
 void magspoof() {
   if (digitalRead(NPIN) == 0) {
     Serial.println("Activating MagSpoof...");
-    int track = 1 + (curTrack++ % 2);
+    int track = (buttonTrack != 0) ? (int)buttonTrack : 1 + (curTrack++ % 2);
     playTrack(track);
     emitMagEvent(millis(), track);
     blink(L1, 150, 3);
@@ -322,6 +338,29 @@ static bool handleCommand(const char *verb, char *args) {
     Serial.println(tracks[0]);
     Serial.print(":t2 ");
     Serial.println(tracks[1]);
+    Serial.print(":btn ");
+    Serial.println(buttonModeName());
+    Serial.println("+OK");
+    return true;
+  }
+
+  // magbtn [1|2|alt] — report, or pin, the track the physical button plays.
+  // Both forms answer with the resulting mode, so the host has one code path.
+  if (strcmp(verb, "magbtn") == 0) {
+    if (*args != '\0') {
+      if (strcmp(args, "1") == 0) {
+        buttonTrack = 1;
+      } else if (strcmp(args, "2") == 0) {
+        buttonTrack = 2;
+      } else if (strcmp(args, "alt") == 0) {
+        buttonTrack = 0;
+      } else {
+        Serial.println("-ERR bad mode");
+        return true;
+      }
+    }
+    Serial.print(":btn ");
+    Serial.println(buttonModeName());
     Serial.println("+OK");
     return true;
   }
