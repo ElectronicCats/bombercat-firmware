@@ -38,20 +38,12 @@
 #define NPIN (5)         // Button
 #define CLOCK_US                                                               \
   (500) // 500us clock, it simulates the speed of the magnetic card swiping
-#define BETWEEN_ZERO (53) // 53 zeros between track1 & 2
 #define TRACKS (2)
-// Longest track magset accepts: fits tracks[128] (+ null) and revTrack[128]
-// (+ LRC byte + null), which is what storeRevTrack() needs.
+// Longest track magset accepts: fits tracks[128] (+ null).
 #define TRACK_MAX_CHARS (126)
 #define DEBUGCAT
 
 char tracks[2][128]; // 2 tracks, 128 chars each (max)
-
-// Track 2 re-encoded for reverse playback: one byte per character, plus the
-// LRC byte and the null terminator, so storeRevTrack() writes strlen + 2 bytes.
-// Sized like tracks[] so any track magset accepts fits; the previous
-// revTrack[41] left exactly zero margin over the 39-char default track.
-char revTrack[128];
 
 const int sublen[] = {32, 48, 48};
 
@@ -89,9 +81,9 @@ static const char *buttonModeName() {
 }
 
 // Copy the active card's tracks and button mode from the CardDatabase cache
-// into the live playback state (tracks[][], buttonTrack) and re-encode the
-// reverse track. Call after anything that changes the active card or its data
-// so playTrack()/magget always see the current card.
+// into the live playback state (tracks[][], buttonTrack). Call after anything
+// that changes the active card or its data so playTrack()/magget always see
+// the current card.
 static void loadActiveIntoRam() {
   const CardEntry *c = cardDb.getActive();
   if (c != nullptr) {
@@ -104,7 +96,6 @@ static void loadActiveIntoRam() {
     tracks[1][0] = '\0';
   }
   buttonTrack = cardDb.buttonTrack();
-  storeRevTrack(2);
 }
 
 void blink(int pin, int msdelay, int times) {
@@ -131,24 +122,10 @@ void playBit(int sendBit) {
   delayMicroseconds(CLOCK_US);
 }
 
-// when reversing
-void reverseTrack(int track) {
-  int i = 0;
-  track--; // index 0
-  dir = 0;
-
-  while (revTrack[i++] != '\0')
-    ;
-  i--;
-  while (i--)
-    for (int j = bitlen[track] - 1; j >= 0; j--)
-      playBit((revTrack[i] >> j) & 1);
-}
-
 // Emit one track forward: leading clock zeros, the track's F2F characters and
 // the LRC byte. `idx` is the 0-based track index. Leaves the field running (no
-// trailing zeros / no pins-low) so a reverse pass can chain onto it, the way a
-// two-track swipe chains track 1 into a reversed track 2.
+// trailing zeros / no pins-low) so the caller decides when to drop the field
+// via endSwipe().
 static void emitTrackForward(int idx) {
   int tmp, crc, lrc = 0;
 
@@ -189,105 +166,34 @@ static void endSwipe() {
   digitalWrite(PIN_B, LOW);
 }
 
-// plays out a full track, calculating CRCs and LRC
+// Emit a single track as one clean forward swipe: the track forward, then the
+// field is dropped. Forward-only (no reverse/there-and-back pass): a magnetic
+// stripe reader (MSR) decodes in both directions, so appending a reverse pass
+// makes it read the data twice, once corrupted at the sentinel. `track` is 1|2.
 void playTrack(int track) {
   dir = 0;
   track--; // index 0
-  // enable H-bridge and LED
-  // digitalWrite(ENABLE_PIN, HIGH);
-
   emitTrackForward(track);
-
-  // if track 1, play 2nd track in reverse (like swiping back?) — but only when
-  // the card actually carries a track 2. Single-track cards (membership/loyalty
-  // cards with just track 1) leave track 2 empty; appending a reverse of an
-  // empty track would put a stray LRC-only blip on the wire.
-  if (track == 0 && tracks[1][0] != '\0') {
-    // if track 1, also play track 2 in reverse
-    // zeros in between
-    for (int i = 0; i < BETWEEN_ZERO; i++)
-      playBit(0);
-
-    // send second track in reverse
-    reverseTrack(2);
-  }
-
   endSwipe();
-}
-
-// Emulate a full there-and-back swipe of a SINGLE track (a 1-track membership
-// or loyalty card): the track forward, a gap, then the SAME track in reverse.
-// A lone forward pass is read by lenient MSR tools but rejected by strict
-// payment terminals, which expect the in-and-out motion a real swipe produces
-// (and use the first pass to lock their clock-recovery PLL before the second).
-// This mirrors the two-track path's forward+reverse structure. `track` is 1|2.
-static void playSingleTrackSwipe(int track) {
-  storeRevTrack(track); // encode THIS track for the return pass
-  dir = 0;
-  emitTrackForward(track - 1); // swipe in
-  for (int i = 0; i < BETWEEN_ZERO; i++)
-    playBit(0);
-  reverseTrack(track); // swipe out: the same track, reversed
-  endSwipe();
-}
-
-// stores track for reverse usage later
-void storeRevTrack(int track) {
-  int i, tmp, crc, lrc = 0;
-  track--; // index 0
-  dir = 0;
-  // Parity goes on the character's top bit, which is track-dependent: bit 4
-  // for track 2's 5-bit characters, bit 6 for track 1's 7-bit ones.
-  const int parityBit = bitlen[track] - 1;
-
-  for (i = 0; tracks[track][i] != '\0'; i++) {
-    crc = 1;
-    tmp = tracks[track][i] - sublen[track];
-
-    for (int j = 0; j < bitlen[track] - 1; j++) {
-      crc ^= tmp & 1;
-      lrc ^= (tmp & 1) << j;
-      tmp & 1 ? (revTrack[i] |= 1 << j) : (revTrack[i] &= ~(1 << j));
-      tmp >>= 1;
-    }
-    crc ? (revTrack[i] |= 1 << parityBit) : (revTrack[i] &= ~(1 << parityBit));
-  }
-
-  // finish calculating and send last "byte" (LRC)
-  tmp = lrc;
-  crc = 1;
-  for (int j = 0; j < bitlen[track] - 1; j++) {
-    crc ^= tmp & 1;
-    tmp & 1 ? (revTrack[i] |= 1 << j) : (revTrack[i] &= ~(1 << j));
-    tmp >>= 1;
-  }
-  crc ? (revTrack[i] |= 1 << parityBit) : (revTrack[i] &= ~(1 << parityBit));
-
-  i++;
-  revTrack[i] = '\0';
 }
 
 // Whether the live copy of track `t` (1 or 2) currently holds data.
 static bool trackPresent(int t) { return tracks[t - 1][0] != '\0'; }
 
-// Play the active card, choosing tracks by what it actually carries instead of
-// assuming two. A two-track card does the classic swipe (track 1 forward +
-// track 2 reverse); a single-track card (membership/loyalty, or a track-2-only
-// debit card) does a there-and-back swipe of its one track so strict readers
-// still accept it. Returns the track number played, or 0 if the card is empty.
+// Play the active card, choosing the track by what it actually carries instead
+// of assuming two. A two-track card is played as track 1 (its track 2 lives at
+// a different physical head; select track 2 explicitly to emit it). A
+// single-track card plays its one track. Every swipe is a single forward pass
+// (see playTrack). Returns the track number played, or 0 if the card is empty.
 static int playActiveCard() {
   bool has1 = trackPresent(1);
   bool has2 = trackPresent(2);
-  if (has1 && has2) {
+  if (has1) {
     playTrack(1);
     return 1;
   }
-  if (has1) {
-    playSingleTrackSwipe(1);
-    return 1;
-  }
   if (has2) {
-    playSingleTrackSwipe(2);
+    playTrack(2);
     return 2;
   }
   return 0;
@@ -298,8 +204,8 @@ void magspoof() {
     Serial.println("Activating MagSpoof...");
     int track;
     if (buttonTrack == 2 && trackPresent(2)) {
-      // Pinned to track 2: play it as a full there-and-back swipe.
-      playSingleTrackSwipe(2);
+      // Pinned to track 2: play track 2 forward.
+      playTrack(2);
       track = 2;
     } else {
       // buttonTrack 0/1: play the active card, adapting to 1- or 2-track.
@@ -447,11 +353,6 @@ static bool handleCommand(const char *verb, char *args) {
     }
     size_t len = strlen(data);
     strcpy(tracks[track - 1], data);
-    // Playing track 1 replays track 2 in reverse, so a new track 2 has to be
-    // re-encoded here or playTrack(1) would keep emitting the previous one.
-    if (track == 2) {
-      storeRevTrack(2);
-    }
     // magset now edits the active card; write the change through to flash.
     persistActiveTracks();
     Serial.print("+OK track ");
@@ -692,7 +593,6 @@ void setup() {
     Serial.println("Card store init failed — using RAM defaults");
     strcpy(tracks[0], DEFAULT_TRACK1);
     strcpy(tracks[1], DEFAULT_TRACK2);
-    storeRevTrack(2);
   }
   Serial.print("Track 1: ");
   Serial.println(tracks[0]);
