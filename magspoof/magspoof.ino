@@ -24,7 +24,13 @@
 
 #include <BomberCatControl.h>
 
-#define BOMBERCAT_FW_VERSION "1.1.1.0"
+#include "CardDatabase.h"
+
+// 1.2.0.0: adds the persistent multi-card store and the `magcard` verb
+// (IMPLEMENTATION_PLAN_MagSpoof_Flash.md, Phase 3). Older images answer
+// `magcard` with "-ERR unknown command", which is how bombercat-tools tells a
+// pre-flash firmware apart and prompts a reflash.
+#define BOMBERCAT_FW_VERSION "1.2.0.0"
 
 #define L1 (LED_BUILTIN) // LED1
 #define PIN_A (6)        // MagSpoof-1
@@ -56,9 +62,22 @@ int dir;
 
 // Which track the physical NPIN button reproduces: 0 alternates 1 <-> 2 (the
 // historical behaviour), 1 or 2 pin it to that single track. Set over the REPL
-// with `magbtn`; RAM-only like the tracks themselves, so a reset restores the
-// alternating default.
+// with `magbtn`/`magcard`; mirrors the active card's persisted button mode
+// (CardDatabase), reloaded from flash on boot.
 unsigned int buttonTrack = 0;
+
+// Persistent multi-card store (IMPLEMENTATION_PLAN_MagSpoof_Flash.md, Phase 3).
+// The global tracks[][]/buttonTrack above are the live playback copy of the
+// *active* card; loadActiveIntoRam() refreshes them whenever the active card or
+// its data changes, so magplay/magget/magbtn and the physical button keep
+// working unchanged while now operating on the selected card.
+CardDatabase cardDb;
+
+// Default card seeded on first boot / factory reset (plan section 10).
+static const char DEFAULT_CARD_NAME[] = "DEFAULT";
+static const char DEFAULT_TRACK1[] =
+    "%B123456781234567^LASTNAME/FIRST^YYMMSSSDDDDDDDDDDDDDDDDDDDDDDDDD?";
+static const char DEFAULT_TRACK2[] = ";123456781234567=112220100000000000000?";
 
 // Wire/report name of the current button mode, shared by `magbtn` and
 // `magget` so both always spell it the same way.
@@ -70,36 +89,22 @@ static const char *buttonModeName() {
   return "alt";
 }
 
-void setupTracks() {
-  String track1 =
-      "%B123456781234567^LASTNAME/FIRST^YYMMSSSDDDDDDDDDDDDDDDDDDDDDDDDD?";
-  String track2 = ";123456781234567=112220100000000000000?";
-
-  // Copy the tracks into the char arrays using strcpy
-  strcpy(tracks[0], track1.c_str());
-  strcpy(tracks[1], track2.c_str());
-
-  Serial.println("Default tracks:");
-  Serial.print("Track 1: ");
-  Serial.println(tracks[0]);
-  Serial.print("Track 2: ");
-  Serial.println(tracks[1]);
-
-  // Keep revTrack in sync so playTrack(1)'s reverseTrack(2) has valid data
-  // instead of replaying whatever was in the (zero-initialized) buffer.
-  storeRevTrack(2);
-}
-
-void updateTracks(String track1, String track2) {
-  strcpy(tracks[0], track1.c_str());
-  strcpy(tracks[1], track2.c_str());
-
-  Serial.println("Updated tracks:");
-  Serial.print("Track 1: ");
-  Serial.println(tracks[0]);
-  Serial.print("Track 2: ");
-  Serial.println(tracks[1]);
-
+// Copy the active card's tracks and button mode from the CardDatabase cache
+// into the live playback state (tracks[][], buttonTrack) and re-encode the
+// reverse track. Call after anything that changes the active card or its data
+// so playTrack()/magget always see the current card.
+static void loadActiveIntoRam() {
+  const CardEntry *c = cardDb.getActive();
+  if (c != nullptr) {
+    strncpy(tracks[0], c->track1, sizeof(tracks[0]) - 1);
+    tracks[0][sizeof(tracks[0]) - 1] = '\0';
+    strncpy(tracks[1], c->track2, sizeof(tracks[1]) - 1);
+    tracks[1][sizeof(tracks[1]) - 1] = '\0';
+  } else {
+    tracks[0][0] = '\0';
+    tracks[1][0] = '\0';
+  }
+  buttonTrack = cardDb.buttonTrack();
   storeRevTrack(2);
 }
 
@@ -263,6 +268,67 @@ static void rstripArgs(char *s) {
     s[--n] = '\0';
 }
 
+// Shared ISO-track validation for `magset` and `magcard set`: returns nullptr
+// when `data` is a valid track for `track` (1 or 2), else a short error slug
+// for a "-ERR <slug>" reply. Enforces the sentinels, length, and the F2F
+// charset (playTrack() keeps only bitlen-1 bits after subtracting sublen, so a
+// character outside the range would be silently mangled on the wire).
+static const char *validateTrack(int track, const char *data) {
+  size_t len = strlen(data);
+  if (len > TRACK_MAX_CHARS)
+    return "track too long";
+  char expectedStart = (track == 1) ? '%' : ';';
+  if (len < 3 || data[0] != expectedStart || data[len - 1] != '?')
+    return "bad track";
+  unsigned char lo = (track == 1) ? 0x20 : 0x30;
+  unsigned char hi = (track == 1) ? 0x5F : 0x3F;
+  for (size_t i = 0; i < len; i++) {
+    unsigned char c = (unsigned char)data[i];
+    if (c < lo || c > hi)
+      return "bad char";
+  }
+  return nullptr;
+}
+
+// Grab the next space-delimited token from *pp: NUL-terminate it in place,
+// advance *pp past it and any following spaces, and return it (an empty string
+// once the args are exhausted). Used by the `magcard` subcommand parser; a
+// track's own data, which may contain spaces, is taken verbatim as the tail
+// after the fixed leading tokens rather than through this splitter.
+static char *nextToken(char **pp) {
+  char *s = *pp;
+  while (*s == ' ')
+    s++;
+  char *start = s;
+  while (*s != '\0' && *s != ' ')
+    s++;
+  if (*s == ' ') {
+    *s++ = '\0';
+    while (*s == ' ')
+      s++;
+  }
+  *pp = s;
+  return start;
+}
+
+// Persist the active card's tracks to flash after a `magset` mutated the live
+// RAM copy, so the change survives a reboot. Failures are swallowed: RAM stays
+// the source of truth for playback, matching the historical RAM-only behaviour
+// if flash is unavailable.
+static void persistActiveTracks() {
+  if (!cardDb.ready())
+    return;
+  const CardEntry *c = cardDb.getActive();
+  if (c == nullptr)
+    return;
+  // activeName() points into the cache entry that update() will overwrite; copy
+  // the key out first so it stays valid through the call.
+  char name[CARD_NAME_MAX + 1];
+  strncpy(name, c->name, sizeof(name) - 1);
+  name[sizeof(name) - 1] = '\0';
+  cardDb.update(name, tracks[0], tracks[1]);
+}
+
 // Serial-control command hook for magplay/magset/magget
 // (IMPLEMENTATION_PLAN_MagSpoof.md sec 4). Emits its own +OK/-ERR terminator
 // and returns true when it handled the verb; returning false lets the core
@@ -297,34 +363,21 @@ static bool handleCommand(const char *verb, char *args) {
     }
     int track = args[0] - '0';
     char *data = args + 2;
+    const char *verr = validateTrack(track, data);
+    if (verr != nullptr) {
+      Serial.print("-ERR ");
+      Serial.println(verr);
+      return true;
+    }
     size_t len = strlen(data);
-    if (len > TRACK_MAX_CHARS) {
-      Serial.println("-ERR track too long");
-      return true;
-    }
-    char expectedStart = (track == 1) ? '%' : ';';
-    if (len < 3 || data[0] != expectedStart || data[len - 1] != '?') {
-      Serial.println("-ERR bad track");
-      return true;
-    }
-    // Only characters the F2F encoder can represent: playTrack() keeps
-    // bitlen-1 bits after subtracting sublen, so anything outside the range is
-    // silently truncated into a *different* character on the wire.
-    unsigned char lo = (track == 1) ? 0x20 : 0x30;
-    unsigned char hi = (track == 1) ? 0x5F : 0x3F;
-    for (size_t i = 0; i < len; i++) {
-      unsigned char c = (unsigned char)data[i];
-      if (c < lo || c > hi) {
-        Serial.println("-ERR bad char");
-        return true;
-      }
-    }
     strcpy(tracks[track - 1], data);
     // Playing track 1 replays track 2 in reverse, so a new track 2 has to be
     // re-encoded here or playTrack(1) would keep emitting the previous one.
     if (track == 2) {
       storeRevTrack(2);
     }
+    // magset now edits the active card; write the change through to flash.
+    persistActiveTracks();
     Serial.print("+OK track ");
     Serial.print(track);
     Serial.print(" set (");
@@ -340,6 +393,8 @@ static bool handleCommand(const char *verb, char *args) {
     Serial.println(tracks[1]);
     Serial.print(":btn ");
     Serial.println(buttonModeName());
+    Serial.print(":name ");
+    Serial.println(cardDb.ready() ? cardDb.activeName() : "");
     Serial.println("+OK");
     return true;
   }
@@ -358,10 +413,175 @@ static bool handleCommand(const char *verb, char *args) {
         Serial.println("-ERR bad mode");
         return true;
       }
+      // Persist the mode with the store so it survives a reboot (RAM-only
+      // before Phase 3); no-op if the card store failed to initialise.
+      if (cardDb.ready())
+        cardDb.setButtonTrack((uint8_t)buttonTrack);
     }
     Serial.print(":btn ");
     Serial.println(buttonModeName());
     Serial.println("+OK");
+    return true;
+  }
+
+  // magcard <sub> ... — persistent multi-card store management (plan section
+  // 3). Subcommands: list | info | get [name] | add <name> | del <name> |
+  // select <name> | set <name> <1|2> <data>. One track per `set` line keeps the
+  // longest command within the REPL's LINE_MAX input buffer; the host CLI
+  // composes an add-with-tracks out of `add` + two `set`s.
+  if (strcmp(verb, "magcard") == 0) {
+    if (!cardDb.ready()) {
+      Serial.println("-ERR not ready");
+      return true;
+    }
+    char *p = args;
+    char *sub = nextToken(&p);
+
+    if (strcmp(sub, "list") == 0) {
+      Serial.print(":count ");
+      Serial.println(cardDb.count());
+      Serial.print(":active ");
+      Serial.println(cardDb.activeName());
+      // One ':cardN' line per card, tab-delimited: the name carries no spaces
+      // or control chars and neither track charset includes a tab, so the host
+      // can split on '\t' unambiguously even when a track contains spaces.
+      for (uint8_t i = 0; i < cardDb.count(); i++) {
+        const CardEntry *c = cardDb.get(i);
+        Serial.print(":card");
+        Serial.print(i);
+        Serial.print(' ');
+        Serial.print(c->name);
+        Serial.print('\t');
+        Serial.print(c->track1);
+        Serial.print('\t');
+        Serial.println(c->track2);
+      }
+      Serial.print("+OK ");
+      Serial.print(cardDb.count());
+      Serial.println(" cards");
+      return true;
+    }
+
+    if (strcmp(sub, "info") == 0) {
+      Serial.print(":count ");
+      Serial.println(cardDb.count());
+      Serial.print(":capacity ");
+      Serial.println(CardDatabase::capacity());
+      Serial.print(":active ");
+      Serial.println(cardDb.activeName());
+      Serial.print(":btn ");
+      Serial.println(buttonModeName());
+      Serial.println("+OK");
+      return true;
+    }
+
+    if (strcmp(sub, "get") == 0) {
+      char *name = nextToken(&p);
+      const CardEntry *c;
+      if (*name == '\0') {
+        c = cardDb.getActive();
+      } else {
+        int idx = cardDb.find(name);
+        c = (idx >= 0) ? cardDb.get((uint8_t)idx) : nullptr;
+      }
+      if (c == nullptr) {
+        Serial.println("-ERR not found");
+        return true;
+      }
+      Serial.print(":name ");
+      Serial.println(c->name);
+      Serial.print(":t1 ");
+      Serial.println(c->track1);
+      Serial.print(":t2 ");
+      Serial.println(c->track2);
+      Serial.print(":active ");
+      Serial.println(strcmp(c->name, cardDb.activeName()) == 0 ? "1" : "0");
+      Serial.println("+OK");
+      return true;
+    }
+
+    if (strcmp(sub, "add") == 0) {
+      char *name = nextToken(&p);
+      DbStatus st = cardDb.add(name, "", "");
+      if (st != DbStatus::Ok) {
+        Serial.print("-ERR ");
+        Serial.println(dbStatusName(st));
+        return true;
+      }
+      Serial.print("+OK added ");
+      Serial.println(name);
+      return true;
+    }
+
+    if (strcmp(sub, "del") == 0) {
+      char *name = nextToken(&p);
+      // Whether this deletes the active card decides if the live RAM copy must
+      // be reloaded (the active index shifts inside remove()).
+      bool wasActive =
+          (*name != '\0' && strcmp(name, cardDb.activeName()) == 0);
+      DbStatus st = cardDb.remove(name);
+      if (st != DbStatus::Ok) {
+        Serial.print("-ERR ");
+        Serial.println(dbStatusName(st));
+        return true;
+      }
+      if (wasActive)
+        loadActiveIntoRam();
+      Serial.print("+OK deleted ");
+      Serial.println(name);
+      return true;
+    }
+
+    if (strcmp(sub, "select") == 0) {
+      char *name = nextToken(&p);
+      DbStatus st = cardDb.select(name);
+      if (st != DbStatus::Ok) {
+        Serial.print("-ERR ");
+        Serial.println(dbStatusName(st));
+        return true;
+      }
+      loadActiveIntoRam();
+      Serial.print(":active ");
+      Serial.println(cardDb.activeName());
+      Serial.println("+OK");
+      return true;
+    }
+
+    if (strcmp(sub, "set") == 0) {
+      char *name = nextToken(&p);
+      char *tk = nextToken(&p);
+      char *data = p; // rest of line verbatim (a track may contain spaces)
+      rstripArgs(data);
+      if (*name == '\0' || (tk[0] != '1' && tk[0] != '2') || tk[1] != '\0') {
+        Serial.println("-ERR bad track");
+        return true;
+      }
+      int track = tk[0] - '0';
+      const char *verr = validateTrack(track, data);
+      if (verr != nullptr) {
+        Serial.print("-ERR ");
+        Serial.println(verr);
+        return true;
+      }
+      const char *t1 = (track == 1) ? data : nullptr;
+      const char *t2 = (track == 2) ? data : nullptr;
+      DbStatus st = cardDb.update(name, t1, t2);
+      if (st != DbStatus::Ok) {
+        Serial.print("-ERR ");
+        Serial.println(dbStatusName(st));
+        return true;
+      }
+      // If we just edited the active card, refresh the live playback copy.
+      if (strcmp(name, cardDb.activeName()) == 0)
+        loadActiveIntoRam();
+      Serial.print("+OK track ");
+      Serial.print(track);
+      Serial.print(" set on ");
+      Serial.println(name);
+      return true;
+    }
+
+    Serial.println("-ERR bad subcommand");
     return true;
   }
 
@@ -383,13 +603,25 @@ void setup() {
 
   // blink to show we started up
   blink(L1, 200, 2);
-  setupTracks();
 
-  String track1 =
-      "%B4784556940589010^HOGAN/PAUL      ^08043210000000725000000?";
-  String track2 = ";4784556940589010=08043210000072500000?";
-  // Uncomment to modify tracks
-  // updateTracks(track1, track2);
+  // Bring up the persistent card store and load the active card into the live
+  // playback state. On first boot this seeds the single DEFAULT card (plan
+  // section 10 migration); if flash init fails, fall back to the RAM defaults
+  // so playback still works.
+  if (cardDb.begin(DEFAULT_CARD_NAME, DEFAULT_TRACK1, DEFAULT_TRACK2)) {
+    loadActiveIntoRam();
+    Serial.print("Active card: ");
+    Serial.println(cardDb.activeName());
+  } else {
+    Serial.println("Card store init failed — using RAM defaults");
+    strcpy(tracks[0], DEFAULT_TRACK1);
+    strcpy(tracks[1], DEFAULT_TRACK2);
+    storeRevTrack(2);
+  }
+  Serial.print("Track 1: ");
+  Serial.println(tracks[0]);
+  Serial.print("Track 2: ");
+  Serial.println(tracks[1]);
 
   Serial.println("Press the MagSpoof button");
 
