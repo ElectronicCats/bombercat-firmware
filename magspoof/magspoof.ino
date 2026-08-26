@@ -38,6 +38,11 @@
 #define NPIN (5)         // Button
 #define CLOCK_US                                                               \
   (500) // 500us clock, it simulates the speed of the magnetic card swiping
+// Leading clock-zero bits emitted before the start sentinel. Real cards carry a
+// long run of zeros here so the reader's clock-recovery PLL locks before the
+// first data character; too few and the reader mis-frames the sentinel (it came
+// out as '+' on some MSRs). 60 gives ample preamble at CLOCK_US bit timing.
+#define LEADING_ZEROS (60)
 #define TRACKS (2)
 // Longest track magset accepts: fits tracks[128] (+ null).
 #define TRACK_MAX_CHARS (126)
@@ -129,8 +134,8 @@ void playBit(int sendBit) {
 static void emitTrackForward(int idx) {
   int tmp, crc, lrc = 0;
 
-  // First put out a bunch of leading zeros.
-  for (int i = 0; i < 25; i++)
+  // First put out a bunch of leading zeros so the reader locks its clock.
+  for (int i = 0; i < LEADING_ZEROS; i++)
     playBit(0);
 
   for (int i = 0; tracks[idx][i] != '\0'; i++) {
@@ -214,7 +219,12 @@ void magspoof() {
     if (track != 0)
       emitMagEvent(millis(), track);
     blink(L1, 150, 3);
-    delay(400);
+    // Wait for the button to be released before allowing another swipe. The old
+    // fixed delay(400) let a held button auto-repeat, which a reader captured
+    // as a duplicate swipe; requiring a release makes one press = one swipe.
+    while (digitalRead(NPIN) == 0)
+      ;
+    delay(50); // debounce the release
   }
 }
 
