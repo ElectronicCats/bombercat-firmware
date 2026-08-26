@@ -181,8 +181,11 @@ void playTrack(int track) {
   }
   playBit(crc);
 
-  // if track 1, play 2nd track in reverse (like swiping back?)
-  if (track == 0) {
+  // if track 1, play 2nd track in reverse (like swiping back?) — but only when
+  // the card actually carries a track 2. Single-track cards (membership/loyalty
+  // cards with just track 1) leave track 2 empty; appending a reverse of an
+  // empty track would put a stray LRC-only blip on the wire.
+  if (track == 0 && tracks[1][0] != '\0') {
     // if track 1, also play track 2 in reverse
     // zeros in between
     for (int i = 0; i < BETWEEN_ZERO; i++)
@@ -236,12 +239,45 @@ void storeRevTrack(int track) {
   revTrack[i] = '\0';
 }
 
+// Whether the live copy of track `t` (1 or 2) currently holds data.
+static bool trackPresent(int t) { return tracks[t - 1][0] != '\0'; }
+
+// Play the active card, choosing tracks by what it actually carries instead of
+// assuming two. A track-1 card plays track 1 (playTrack() appends track 2 in
+// reverse only when present); a track-2-only card (some membership cards) plays
+// track 2. Returns the track number played, or 0 if the card has no data.
+static int playActiveCard() {
+  if (trackPresent(1)) {
+    playTrack(1);
+    return 1;
+  }
+  if (trackPresent(2)) {
+    playTrack(2);
+    return 2;
+  }
+  return 0;
+}
+
 void magspoof() {
   if (digitalRead(NPIN) == 0) {
     Serial.println("Activating MagSpoof...");
-    int track = (buttonTrack != 0) ? (int)buttonTrack : 1 + (curTrack++ % 2);
-    playTrack(track);
-    emitMagEvent(millis(), track);
+    int track;
+    if (buttonTrack == 2) {
+      // Pinned to track 2: play it if present.
+      track = trackPresent(2) ? (playTrack(2), 2) : 0;
+    } else if (buttonTrack == 1) {
+      // "Play the card": adapts to 1- or 2-track cards.
+      track = playActiveCard();
+    } else {
+      // Alternate 1<->2, but skip a track the card doesn't have so a
+      // single-track card still reproduces on every press.
+      track = 1 + (curTrack++ % 2);
+      if (!trackPresent(track))
+        track = (track == 1) ? 2 : 1;
+      track = trackPresent(track) ? (playTrack(track), track) : 0;
+    }
+    if (track != 0)
+      emitMagEvent(millis(), track);
     blink(L1, 150, 3);
     delay(400);
   }
@@ -339,16 +375,27 @@ static bool handleCommand(const char *verb, char *args) {
   if (strcmp(verb, "magplay") == 0) {
     int track;
     if (*args == '\0') {
-      track = 1 + (curTrack++ % 2);
-    } else if (strcmp(args, "1") == 0) {
-      track = 1;
-    } else if (strcmp(args, "2") == 0) {
-      track = 2;
+      // Bare `magplay` plays the active card, auto-selecting the track(s) it
+      // actually carries — the host CLI's `play` uses this so a 1-track
+      // membership card and a 2-track card both "just play".
+      track = playActiveCard();
+      if (track == 0) {
+        Serial.println("-ERR empty card");
+        return true;
+      }
+    } else if (strcmp(args, "1") == 0 || strcmp(args, "2") == 0) {
+      // Explicit single-track play (raw-serial / power use). Refuse a track the
+      // active card doesn't have rather than emit an empty swipe.
+      track = args[0] - '0';
+      if (!trackPresent(track)) {
+        Serial.println("-ERR empty track");
+        return true;
+      }
+      playTrack(track);
     } else {
       Serial.println("-ERR bad track");
       return true;
     }
-    playTrack(track);
     emitMagEvent(millis(), track);
     Serial.print("+OK played ");
     Serial.println(track);
