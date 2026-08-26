@@ -34,11 +34,18 @@
   (500) // 500us clock, it simulates the speed of the magnetic card swiping
 #define BETWEEN_ZERO (53) // 53 zeros between track1 & 2
 #define TRACKS (2)
+// Longest track magset accepts: fits tracks[128] (+ null) and revTrack[128]
+// (+ LRC byte + null), which is what storeRevTrack() needs.
+#define TRACK_MAX_CHARS (126)
 #define DEBUGCAT
 
 char tracks[2][128]; // 2 tracks, 128 chars each (max)
 
-char revTrack[41]; // 40 chars + null
+// Track 2 re-encoded for reverse playback: one byte per character, plus the
+// LRC byte and the null terminator, so storeRevTrack() writes strlen + 2 bytes.
+// Sized like tracks[] so any track magset accepts fits; the previous
+// revTrack[41] left exactly zero margin over the 39-char default track.
+char revTrack[128];
 
 const int sublen[] = {32, 48, 48};
 
@@ -177,6 +184,9 @@ void storeRevTrack(int track) {
   int i, tmp, crc, lrc = 0;
   track--; // index 0
   dir = 0;
+  // Parity goes on the character's top bit, which is track-dependent: bit 4
+  // for track 2's 5-bit characters, bit 6 for track 1's 7-bit ones.
+  const int parityBit = bitlen[track] - 1;
 
   for (i = 0; tracks[track][i] != '\0'; i++) {
     crc = 1;
@@ -188,7 +198,7 @@ void storeRevTrack(int track) {
       tmp & 1 ? (revTrack[i] |= 1 << j) : (revTrack[i] &= ~(1 << j));
       tmp >>= 1;
     }
-    crc ? (revTrack[i] |= 1 << 4) : (revTrack[i] &= ~(1 << 4));
+    crc ? (revTrack[i] |= 1 << parityBit) : (revTrack[i] &= ~(1 << parityBit));
   }
 
   // finish calculating and send last "byte" (LRC)
@@ -199,7 +209,7 @@ void storeRevTrack(int track) {
     tmp & 1 ? (revTrack[i] |= 1 << j) : (revTrack[i] &= ~(1 << j));
     tmp >>= 1;
   }
-  crc ? (revTrack[i] |= 1 << 4) : (revTrack[i] &= ~(1 << 4));
+  crc ? (revTrack[i] |= 1 << parityBit) : (revTrack[i] &= ~(1 << parityBit));
 
   i++;
   revTrack[i] = '\0';
@@ -218,7 +228,9 @@ void magspoof() {
 
 // Structured event consumed by bombercat-tools, same conventions as :tag/
 // :reader: ":mag <ts_ms> <track>", one per reproduction regardless of origin
-// (command or physical button).
+// (command or physical button). The timestamp is taken once playback returns,
+// so it marks the end of the swipe, not its start (playTrack() blocks for
+// ~0.6-1.5 s).
 void emitMagEvent(uint32_t tsMs, int track) {
   Serial.print(":mag ");
   Serial.print(tsMs);
@@ -226,11 +238,22 @@ void emitMagEvent(uint32_t tsMs, int track) {
   Serial.println(track);
 }
 
+// The core REPL only skips the spaces *before* the args, so a trailing space
+// or tab would survive inside the payload and break magset's "ends with '?'"
+// check or magplay's exact match.
+static void rstripArgs(char *s) {
+  size_t n = strlen(s);
+  while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t'))
+    s[--n] = '\0';
+}
+
 // Serial-control command hook for magplay/magset/magget
 // (IMPLEMENTATION_PLAN_MagSpoof.md sec 4). Emits its own +OK/-ERR terminator
 // and returns true when it handled the verb; returning false lets the core
 // REPL answer "-ERR unknown command" instead.
 static bool handleCommand(const char *verb, char *args) {
+  rstripArgs(args);
+
   if (strcmp(verb, "magplay") == 0) {
     int track;
     if (*args == '\0') {
@@ -245,9 +268,9 @@ static bool handleCommand(const char *verb, char *args) {
     }
     playTrack(track);
     emitMagEvent(millis(), track);
-    blink(L1, 150, 3);
     Serial.print("+OK played ");
     Serial.println(track);
+    blink(L1, 150, 3); // after the terminator: 900 ms the host need not wait
     return true;
   }
 
@@ -259,7 +282,7 @@ static bool handleCommand(const char *verb, char *args) {
     int track = args[0] - '0';
     char *data = args + 2;
     size_t len = strlen(data);
-    if (len > 126) {
+    if (len > TRACK_MAX_CHARS) {
       Serial.println("-ERR track too long");
       return true;
     }
@@ -268,7 +291,24 @@ static bool handleCommand(const char *verb, char *args) {
       Serial.println("-ERR bad track");
       return true;
     }
+    // Only characters the F2F encoder can represent: playTrack() keeps
+    // bitlen-1 bits after subtracting sublen, so anything outside the range is
+    // silently truncated into a *different* character on the wire.
+    unsigned char lo = (track == 1) ? 0x20 : 0x30;
+    unsigned char hi = (track == 1) ? 0x5F : 0x3F;
+    for (size_t i = 0; i < len; i++) {
+      unsigned char c = (unsigned char)data[i];
+      if (c < lo || c > hi) {
+        Serial.println("-ERR bad char");
+        return true;
+      }
+    }
     strcpy(tracks[track - 1], data);
+    // Playing track 1 replays track 2 in reverse, so a new track 2 has to be
+    // re-encoded here or playTrack(1) would keep emitting the previous one.
+    if (track == 2) {
+      storeRevTrack(2);
+    }
     Serial.print("+OK track ");
     Serial.print(track);
     Serial.print(" set (");
