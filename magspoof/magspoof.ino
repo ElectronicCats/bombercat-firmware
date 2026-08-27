@@ -26,11 +26,29 @@
 
 #include "CardDatabase.h"
 
+// 1.2.3.0: two-track cards now play TRACK 2 by default (playActiveCard/button
+// alt mode). One coil can't drive a reader's parallel heads at once, so a real
+// combined dual-track read is impossible; every attempt to emit both left the
+// reader latching track 1 (often twice) and dropping track 2. Track 2 carries
+// the financial PAN/expiry most readers consume, so emitting it alone gives the
+// clean isolated swipe that reads reliably. `magplay 1` / `magbtn 1` still
+// force track 1. Bumped so `bombercat info` confirms which image is actually
+// flashed.
+//
+// 1.2.2.0: attempted to emit BOTH tracks per swipe — reverted in 1.2.3.0
+// because the reader could not capture two tracks from a single coil (it
+// re-read track 1 and missed track 2).
+//
+// 1.2.1.0: MSR read fixes — forward-only single pass (no reverse/there-and-back
+// double read), 60-bit leading clock preamble so the reader locks before the
+// start sentinel, and button-release debounce (one press = one swipe). Bumped
+// from 1.2.0.0 so `bombercat info` confirms which image is actually flashed.
+//
 // 1.2.0.0: adds the persistent multi-card store and the `magcard` verb
 // (IMPLEMENTATION_PLAN_MagSpoof_Flash.md, Phase 3). Older images answer
 // `magcard` with "-ERR unknown command", which is how bombercat-tools tells a
 // pre-flash firmware apart and prompts a reflash.
-#define BOMBERCAT_FW_VERSION "1.2.0.0"
+#define BOMBERCAT_FW_VERSION "1.2.3.0"
 
 #define L1 (LED_BUILTIN) // LED1
 #define PIN_A (6)        // MagSpoof-1
@@ -185,21 +203,25 @@ void playTrack(int track) {
 // Whether the live copy of track `t` (1 or 2) currently holds data.
 static bool trackPresent(int t) { return tracks[t - 1][0] != '\0'; }
 
-// Play the active card, choosing the track by what it actually carries instead
-// of assuming two. A two-track card is played as track 1 (its track 2 lives at
-// a different physical head; select track 2 explicitly to emit it). A
-// single-track card plays its one track. Every swipe is a single forward pass
-// (see playTrack). Returns the track number played, or 0 if the card is empty.
+// Play the active card, preferring track 2 whenever it is present. A single
+// MagSpoof coil cannot drive a reader's parallel track heads at once, so a
+// two-track card can't be reproduced as a real card's combined dual-track line:
+// every attempt to emit both (chained into one field, or as two isolated
+// swipes) left the reader latching track 1 — sometimes twice — and dropping
+// track 2 entirely. On a financial card track 2 carries the PAN/expiry/service
+// code that most readers actually consume, so emitting track 2 ALONE gives it
+// the clean isolated swipe the reader reads reliably (the same path the
+// single-track track-2 cards already use). A track-1-only card still plays its
+// track 1. Explicit `magplay 1` / `magbtn 1` override this to force track 1.
+// Returns the track number played, or 0 if the card is empty.
 static int playActiveCard() {
-  bool has1 = trackPresent(1);
-  bool has2 = trackPresent(2);
-  if (has1) {
-    playTrack(1);
-    return 1;
-  }
-  if (has2) {
+  if (trackPresent(2)) {
     playTrack(2);
     return 2;
+  }
+  if (trackPresent(1)) {
+    playTrack(1);
+    return 1;
   }
   return 0;
 }
@@ -208,12 +230,16 @@ void magspoof() {
   if (digitalRead(NPIN) == 0) {
     Serial.println("Activating MagSpoof...");
     int track;
-    if (buttonTrack == 2 && trackPresent(2)) {
+    if (buttonTrack == 1 && trackPresent(1)) {
+      // Pinned to track 1: force track 1 (playActiveCard would prefer track 2).
+      playTrack(1);
+      track = 1;
+    } else if (buttonTrack == 2 && trackPresent(2)) {
       // Pinned to track 2: play track 2 forward.
       playTrack(2);
       track = 2;
     } else {
-      // buttonTrack 0/1: play the active card, adapting to 1- or 2-track.
+      // buttonTrack 0 (alt): play the active card, which prefers track 2.
       track = playActiveCard();
     }
     if (track != 0)
