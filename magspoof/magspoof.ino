@@ -25,6 +25,7 @@
 #include <BomberCatControl.h>
 
 #include "CardDatabase.h"
+#include "NfcController.h"
 
 // 1.2.3.0: two-track cards now play TRACK 2 by default (playActiveCard/button
 // alt mode). One coil can't drive a reader's parallel heads at once, so a real
@@ -86,6 +87,11 @@ unsigned int buttonTrack = 0;
 // its data changes, so magplay/magget/magbtn and the physical button keep
 // working unchanged while now operating on the selected card.
 CardDatabase cardDb;
+
+// PN7150 NFC controller (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md Phase 1).
+// Default-constructed: BomberCat's PN7150 wiring (IRQ=11, VEN=13, I2C
+// addr=0x28) is baked into NfcController.h's defaults, same as NFCGate.ino.
+NfcController nfc;
 
 // Default card seeded on first boot / factory reset (plan section 10).
 static const char DEFAULT_CARD_NAME[] = "DEFAULT";
@@ -601,6 +607,15 @@ static bool handleCommand(const char *verb, char *args) {
   return false;
 }
 
+// Switch the PN7150 into reader (false) or card-emulation (true) mode and
+// re-run its NCI bring-up. Wraps NfcController's two mode entry points behind
+// one call so later phases (SEL_RES automation, VISA MSD emulation, Track 2
+// extraction) can flip modes without duplicating the beginReaderMode() /
+// beginEmulationMode() choice at each call site.
+bool resetNfc(bool emulation) {
+  return emulation ? nfc.beginEmulationMode() : nfc.beginReaderMode();
+}
+
 // BomberCat serial-control REPL (ping/info/identify) for bombercat-tools.
 BomberCatControl control(Serial, BOMBERCAT_FW_VERSION, "magspoof");
 
@@ -634,6 +649,16 @@ void setup() {
   Serial.println(tracks[0]);
   Serial.print("Track 2: ");
   Serial.println(tracks[1]);
+
+  // Bring up the PN7150 in reader mode by default. Failure is reported but
+  // non-fatal: MagSpoof playback works over the coil regardless of NFC state,
+  // and later phases add CLI commands (nfcselres/nfcvisa/nfcread) that can
+  // retry via resetNfc().
+  if (resetNfc(false)) {
+    Serial.println("NFC ready (reader mode)");
+  } else {
+    Serial.println("NFC init failed");
+  }
 
   Serial.println("Press the MagSpoof button");
 
