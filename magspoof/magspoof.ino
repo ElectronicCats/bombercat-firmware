@@ -117,6 +117,12 @@ uint8_t uidcf[20] = {
 };
 uint8_t uidlen = 0;
 
+// Which RF role the PN7150 is currently in, tracked here because
+// NfcController itself doesn't expose it -- resetNfc() is the only place
+// that switches modes, so it's the only place that needs to update this.
+// Consumed by `nfcinfo` (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md Phase 6).
+static bool nfcEmulationMode = false;
+
 // Placeholder NFCID1 used by setSelResChip(). hunterCatNFC fills this slot
 // with a real card's scanned UID (detectcard(), line 418) when cloning a tag;
 // VISA MSD emulation doesn't clone a UID, and Track 2 (not the NFC-A UID)
@@ -477,9 +483,12 @@ static bool handleCommand(const char *verb, char *args) {
 
   // magcard <sub> ... — persistent multi-card store management (plan section
   // 3). Subcommands: list | info | get [name] | add <name> | del <name> |
-  // select <name> | set <name> <1|2> <data>. One track per `set` line keeps the
-  // longest command within the REPL's LINE_MAX input buffer; the host CLI
-  // composes an add-with-tracks out of `add` + two `set`s.
+  // select <name> | set <name> <1|2> <data> | set <name> nfc <chip|nochip>.
+  // One track per `set` line keeps the longest command within the REPL's
+  // LINE_MAX input buffer; the host CLI composes an add-with-tracks out of
+  // `add` + two `set`s. `set <name> nfc ...` (Phase 5.3) stores this card's
+  // SEL_RES preference, consulted by resetNfc()/emulateVisaMSD() whenever the
+  // card is active (Phase 5.4).
   if (strcmp(verb, "magcard") == 0) {
     if (!cardDb.ready()) {
       Serial.println("-ERR not ready");
@@ -547,6 +556,9 @@ static bool handleCommand(const char *verb, char *args) {
       Serial.println(c->track2);
       Serial.print(":active ");
       Serial.println(strcmp(c->name, cardDb.activeName()) == 0 ? "1" : "0");
+      Serial.print(":nfc ");
+      Serial.println(c->nfcEnabled ? (c->selResMode ? "chip" : "nochip")
+                                   : "default");
       Serial.println("+OK");
       return true;
     }
@@ -601,6 +613,31 @@ static bool handleCommand(const char *verb, char *args) {
     if (strcmp(sub, "set") == 0) {
       char *name = nextToken(&p);
       char *tk = nextToken(&p);
+
+      if (strcmp(tk, "nfc") == 0) {
+        char *mode = nextToken(&p);
+        bool hasChip;
+        if (strcmp(mode, "chip") == 0) {
+          hasChip = true;
+        } else if (strcmp(mode, "nochip") == 0) {
+          hasChip = false;
+        } else {
+          Serial.println("-ERR bad mode");
+          return true;
+        }
+        DbStatus st = cardDb.setNfcMode(name, hasChip);
+        if (st != DbStatus::Ok) {
+          Serial.print("-ERR ");
+          Serial.println(dbStatusName(st));
+          return true;
+        }
+        Serial.print("+OK nfc ");
+        Serial.print(hasChip ? "chip" : "nochip");
+        Serial.print(" set on ");
+        Serial.println(name);
+        return true;
+      }
+
       char *data = p; // rest of line verbatim (a track may contain spaces)
       rstripArgs(data);
       if (*name == '\0' || (tk[0] != '1' && tk[0] != '2') || tk[1] != '\0') {
@@ -724,6 +761,48 @@ static bool handleCommand(const char *verb, char *args) {
     return true;
   }
 
+  // nfcinfo -- report PN7150 firmware version, current RF role, current
+  // SEL_RES override and whatever tag was last detected
+  // (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md Phase 6.4). Pure status read:
+  // unlike nfcread/nfcvisa it never switches mode or blocks waiting for a
+  // tag, so it's safe to call regardless of what the chip is doing --
+  // "detected tag info" is whatever remoteDevice still holds from the last
+  // discovery event (nfcread, or the reader-mode bring-up at boot), not a
+  // fresh probe.
+  if (strcmp(verb, "nfcinfo") == 0) {
+    int fw = nfc.raw().getFirmwareVersion();
+    Serial.print(":fw ");
+    Serial.print((fw >> 16) & 0xFF, HEX);
+    Serial.print('.');
+    Serial.print((fw >> 8) & 0xFF, HEX);
+    Serial.print('.');
+    Serial.println(fw & 0xFF, HEX);
+
+    Serial.print(":mode ");
+    Serial.println(nfcEmulationMode ? "emulation" : "reader");
+
+    Serial.print(":selres ");
+    if (uidlen == 0) {
+      // setSelResChip() has never run -- only possible if the initial
+      // resetNfc(false) call in setup() failed outright.
+      Serial.println("unknown");
+    } else {
+      Serial.println((uidcf[8] & 0x20) ? "chip" : "nochip");
+    }
+
+    const RemoteDevice &dev = nfc.raw().remoteDevice;
+    uint8_t uidLen = dev.getNFCIDLen();
+    Serial.print(":tag ");
+    Serial.println(uidLen > 0 ? "yes" : "no");
+    if (uidLen > 0) {
+      Serial.print(":uid ");
+      HexUtils::print(Serial, dev.getNFCID(), uidLen);
+      Serial.println();
+    }
+    Serial.println("+OK");
+    return true;
+  }
+
   return false;
 }
 
@@ -749,19 +828,34 @@ bool setSelResChip(bool hasChip) {
   return nfc.raw().configureSettings(uidcf, uidlen);
 }
 
+// SEL_RES value to apply for a given mode: the active card's stored
+// preference (Phase 5.3/5.4, `magcard set <name> nfc <chip|nochip>`) if it
+// has one, otherwise the mode's own default (chip for reader mode, no-chip
+// for MSD emulation). Read live off cardDb.getActive() at every call site
+// (resetNfc() and emulateVisaMSD()'s cardReArm() path below) rather than
+// pushed once from `magcard select`, since NFC is only initialized/re-armed
+// when actually needed (clarifying question 2) and the active card can
+// change between calls.
+static bool selResChipFor(bool emulation) {
+  bool byDefault = !emulation;
+  const CardEntry *active = cardDb.ready() ? cardDb.getActive() : nullptr;
+  if (active != nullptr && active->nfcEnabled)
+    return active->selResMode != 0;
+  return byDefault;
+}
+
 // Switch the PN7150 into reader (false) or card-emulation (true) mode, re-run
-// its NCI bring-up, and auto-apply that mode's SEL_RES default: chip mode for
-// reader (advertise ISO-DEP support so a full EMV card can be read), no-chip
-// for MSD emulation (the POS falls back to magstripe instead of attempting
-// EMV crypto the emulation can't satisfy). Wraps NfcController's two mode
-// entry points behind one call so later phases (VISA MSD emulation, Track 2
-// extraction) can flip modes without duplicating the choice at each call
-// site; `nfcselres` (Phase 2.4) can still override the result afterward.
+// its NCI bring-up, and apply that mode's SEL_RES value (see selResChipFor()
+// above). Wraps NfcController's two mode entry points behind one call so
+// later phases (VISA MSD emulation, Track 2 extraction) can flip modes
+// without duplicating the choice at each call site; `nfcselres` (Phase 2.4)
+// can still override the result afterward.
 bool resetNfc(bool emulation) {
   bool ok = emulation ? nfc.beginEmulationMode() : nfc.beginReaderMode();
   if (!ok)
     return false;
-  return setSelResChip(!emulation);
+  nfcEmulationMode = emulation;
+  return setSelResChip(selResChipFor(emulation));
 }
 
 // --- VISA MSD emulation (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md Phase 3)
@@ -911,9 +1005,12 @@ bool emulateVisaMSD() {
       // terminal has tapped yet, or one left mid-transaction. Re-arm
       // listening and keep waiting for the overall deadline. cardReArm()
       // re-runs the plain emulation bring-up (NfcController.cpp), which
-      // reverts the SEL_RES override, so it must be re-applied here.
+      // reverts the SEL_RES override, so it must be re-applied here --
+      // via selResChipFor() (Phase 5), not a hardcoded no-chip, so a
+      // terminal that drops and retaps mid-run still sees the active card's
+      // stored preference.
       if (nfc.cardReArm())
-        setSelResChip(false);
+        setSelResChip(selResChipFor(true));
       continue;
     }
     nfc.cardSend(apdus2[i], apdusLen2[i]);
