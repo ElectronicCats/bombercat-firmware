@@ -79,6 +79,11 @@ public:
   // Persisted physical-button mode: 0 = alternate, 1 or 2 = pinned track.
   DbStatus setButtonTrack(uint8_t mode);
 
+  // Set an existing card's SEL_RES preference (Phase 5): nfcEnabled=true,
+  // selResMode = hasChip ? 1 : 0. Consulted by resetNfc()/emulateVisaMSD()
+  // in magspoof.ino whenever this card is active.
+  DbStatus setNfcMode(const char *name, bool hasChip);
+
   // Erase everything and reseed the single default card. Used by the factory
   // reset (section 6.3) and first-boot migration.
   bool factoryReset(const char *defName, const char *defTrack1,

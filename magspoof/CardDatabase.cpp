@@ -72,8 +72,16 @@ bool CardDatabase::begin(const char *defName, const char *defTrack1,
 
   _ready = true;
 
-  // First boot (or a wiped/empty store): seed the default card.
-  if (!haveCfg || _count == 0)
+  // First boot (or a wiped/empty store): seed the default card. Note this is
+  // deliberately `_count == 0` and NOT `!haveCfg || _count == 0`: a
+  // CONFIG_VERSION bump alone makes readConfig() report !haveCfg (it returns
+  // defaultConfig() on a version mismatch) even though every card slot
+  // migrated cleanly via FlashStorage::readCard(); factory-resetting here
+  // would wipe those cards for no reason. The mismatch between the
+  // (defaulted) `cfg` and the actually-loaded `_count`/`_activeIndex` is
+  // instead handled by the re-persist block below, which also completes the
+  // migration by rewriting cfg with the current CONFIG_VERSION.
+  if (_count == 0)
     return factoryReset(defName, defTrack1, defTrack2);
 
   _activeIndex = (cfg.activeIndex < _count) ? cfg.activeIndex : 0;
@@ -231,6 +239,21 @@ DbStatus CardDatabase::setButtonTrack(uint8_t mode) {
     return DbStatus::ErrBadName; // reused: caller validates the token first
   _buttonTrack = mode;
   if (!persistConfig())
+    return DbStatus::ErrFlash;
+  return DbStatus::Ok;
+}
+
+DbStatus CardDatabase::setNfcMode(const char *name, bool hasChip) {
+  if (!_ready)
+    return DbStatus::ErrNotReady;
+  int idx = find(name);
+  if (idx < 0)
+    return DbStatus::ErrNotFound;
+
+  CardEntry &c = _cards[idx];
+  c.nfcEnabled = true;
+  c.selResMode = hasChip ? 1 : 0;
+  if (!_flash.writeCard(idx, c))
     return DbStatus::ErrFlash;
   return DbStatus::Ok;
 }
