@@ -93,6 +93,28 @@ CardDatabase cardDb;
 // addr=0x28) is baked into NfcController.h's defaults, same as NFCGate.ino.
 NfcController nfc;
 
+// SEL_RES override buffer (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md Phase 2),
+// ported verbatim from hunterCatNFC_AllOne.ino:61-65. This is the raw
+// CORE_SET_CONFIG_CMD payload nfc.raw().configureSettings() sends to the
+// PN7150; passing uidlen==0 makes the library ignore this buffer entirely and
+// fall back to its own built-in default (Electroniccats_PN7150::
+// configureSettings()'s `if (uidlen == 0) uidlen = 8;` branch), so
+// setSelResChip() always rebuilds a full override rather than only touching
+// uidcf[8].
+uint8_t uidcf[20] = {
+    0x20, 0x02, 0x05, 0x01, // CORE_SET_CONFIG_CMD
+    0x00, 0x02, 0x00, 0x01  // TOTAL_DURATION
+};
+uint8_t uidlen = 0;
+
+// Placeholder NFCID1 used by setSelResChip(). hunterCatNFC fills this slot
+// with a real card's scanned UID (detectcard(), line 418) when cloning a tag;
+// VISA MSD emulation doesn't clone a UID, and Track 2 (not the NFC-A UID)
+// carries the card identity through the APDU exchange, so any fixed 4-byte
+// value works here. 4 bytes = single-size NFCID1 (avoid the 0x88
+// cascade-tag prefix byte).
+static const uint8_t SEL_RES_DUMMY_UID[4] = {0xDE, 0xAD, 0xBE, 0xEF};
+
 // Default card seeded on first boot / factory reset (plan section 10).
 static const char DEFAULT_CARD_NAME[] = "DEFAULT";
 static const char DEFAULT_TRACK1[] =
@@ -604,16 +626,67 @@ static bool handleCommand(const char *verb, char *args) {
     return true;
   }
 
+  // nfcselres <chip|nochip> -- manual SEL_RES override
+  // (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md Phase 2.4). Pushes the
+  // chip/no-chip bit immediately; a later mode switch (resetNfc(), e.g. via
+  // nfcread/nfcvisa in later phases) resets it back to that mode's default.
+  if (strcmp(verb, "nfcselres") == 0) {
+    bool hasChip;
+    if (strcmp(args, "chip") == 0) {
+      hasChip = true;
+    } else if (strcmp(args, "nochip") == 0) {
+      hasChip = false;
+    } else {
+      Serial.println("-ERR bad mode");
+      return true;
+    }
+    if (!setSelResChip(hasChip)) {
+      Serial.println("-ERR nfc config failed");
+      return true;
+    }
+    Serial.print("+OK selres ");
+    Serial.println(hasChip ? "chip" : "nochip");
+    return true;
+  }
+
   return false;
 }
 
-// Switch the PN7150 into reader (false) or card-emulation (true) mode and
-// re-run its NCI bring-up. Wraps NfcController's two mode entry points behind
-// one call so later phases (SEL_RES automation, VISA MSD emulation, Track 2
-// extraction) can flip modes without duplicating the beginReaderMode() /
-// beginEmulationMode() choice at each call site.
+// Toggle the PN7150's emulated SEL_RES "supports ISO-DEP/chip" bit (byte 8 of
+// uidcf, bit 0x20) and push it to the chip. hasChip=true -> 0x33 (EMV/
+// contactless); false -> 0x13 (MSD fallback). Ported from hunterCatNFC_AllOne
+// .ino:411-418 (detectcard()), minus the real-UID capture -- see
+// SEL_RES_DUMMY_UID above.
+//
+// Must be called AFTER beginReaderMode()/beginEmulationMode() (or a plain
+// reset()), never before: both call the library's no-arg configureSettings()
+// internally, which would overwrite this override with the chip's built-in
+// default. A mid-emulation cardReArm() (Phase 3+) re-runs that same bring-up,
+// so any caller relying on cardReArm() must re-apply setSelResChip()
+// afterward.
+bool setSelResChip(bool hasChip) {
+  uidcf[2] = 7 + sizeof(SEL_RES_DUMMY_UID);
+  uidcf[3] = 0x02;
+  uidcf[8] = hasChip ? 0x33 : 0x13;
+  uidcf[9] = sizeof(SEL_RES_DUMMY_UID);
+  memcpy(&uidcf[10], SEL_RES_DUMMY_UID, sizeof(SEL_RES_DUMMY_UID));
+  uidlen = sizeof(SEL_RES_DUMMY_UID);
+  return nfc.raw().configureSettings(uidcf, uidlen);
+}
+
+// Switch the PN7150 into reader (false) or card-emulation (true) mode, re-run
+// its NCI bring-up, and auto-apply that mode's SEL_RES default: chip mode for
+// reader (advertise ISO-DEP support so a full EMV card can be read), no-chip
+// for MSD emulation (the POS falls back to magstripe instead of attempting
+// EMV crypto the emulation can't satisfy). Wraps NfcController's two mode
+// entry points behind one call so later phases (VISA MSD emulation, Track 2
+// extraction) can flip modes without duplicating the choice at each call
+// site; `nfcselres` (Phase 2.4) can still override the result afterward.
 bool resetNfc(bool emulation) {
-  return emulation ? nfc.beginEmulationMode() : nfc.beginReaderMode();
+  bool ok = emulation ? nfc.beginEmulationMode() : nfc.beginReaderMode();
+  if (!ok)
+    return false;
+  return setSelResChip(!emulation);
 }
 
 // BomberCat serial-control REPL (ping/info/identify) for bombercat-tools.
