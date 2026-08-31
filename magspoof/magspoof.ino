@@ -28,6 +28,11 @@
 #include "Log.h"
 #include "NfcController.h"
 
+// 1.2.4.0: `nfcread` now takes an optional [name] argument so a scan can
+// target a chosen card instead of always overwriting the active one -- an
+// existing name updates that card's Track 2, a new name creates it. Bumped
+// so `bombercat info` confirms which image is actually flashed.
+//
 // 1.2.3.0: two-track cards now play TRACK 2 by default (playActiveCard/button
 // alt mode). One coil can't drive a reader's parallel heads at once, so a real
 // combined dual-track read is impossible; every attempt to emit both left the
@@ -50,7 +55,7 @@
 // (IMPLEMENTATION_PLAN_MagSpoof_Flash.md, Phase 3). Older images answer
 // `magcard` with "-ERR unknown command", which is how bombercat-tools tells a
 // pre-flash firmware apart and prompts a reflash.
-#define BOMBERCAT_FW_VERSION "1.2.3.0"
+#define BOMBERCAT_FW_VERSION "1.2.4.0"
 
 #define L1 (LED_BUILTIN) // LED1
 #define PIN_A (6)        // MagSpoof-1
@@ -708,18 +713,25 @@ static bool handleCommand(const char *verb, char *args) {
     return true;
   }
 
-  // nfcread -- read a physical EMV/Visa card's Track 2 over NFC and store it
-  // as the active card's Track 2 (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md
-  // Phase 4.4). Switches the PN7150 into reader mode, waits up to
-  // NFC_READ_WAIT_TAG_MS for a card to enter the field, then runs the
-  // PPSE/AID/GPO/READ RECORD sequence once. NFC-sourced cards aren't
-  // flagged as such in CardDatabase yet (that's Phase 5); this stores the
-  // extracted Track 2 the same way `magcard set`/`magset` would.
+  // nfcread [name] -- read a physical EMV/Visa card's Track 2 over NFC and
+  // store it (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md Phase 4.4, extended
+  // to target a chosen card rather than always the active one). Switches the
+  // PN7150 into reader mode, waits up to NFC_READ_WAIT_TAG_MS for a card to
+  // enter the field, then runs the PPSE/AID/GPO/READ RECORD sequence once.
+  // With no name, the active card's Track 2 is overwritten (the original,
+  // back-compat behaviour, still used by raw-serial callers). With a name:
+  // an existing card of that name has its Track 2 updated; a name not yet in
+  // the store is created fresh (Track 1 empty) and its Track 2 set — so the
+  // caller picks new-vs-existing purely by whether that name already exists.
+  // Either way Track 1, if any, is left untouched, and the target only
+  // becomes active if it already was.
   if (strcmp(verb, "nfcread") == 0) {
     if (!cardDb.ready()) {
       Serial.println("-ERR not ready");
       return true;
     }
+    char *p = args;
+    char *requestedName = nextToken(&p);
     if (!resetNfc(false)) {
       Serial.println("-ERR nfc reader mode failed");
       return true;
@@ -746,18 +758,45 @@ static bool handleCommand(const char *verb, char *args) {
       return true;
     }
     char name[CARD_NAME_MAX + 1];
-    strncpy(name, cardDb.activeName(), sizeof(name) - 1);
-    name[sizeof(name) - 1] = '\0';
-    DbStatus st = cardDb.update(name, nullptr, track2);
+    const char *targetName;
+    bool isNew = false;
+    if (*requestedName == '\0') {
+      // activeName() points into the cache entry that add()/update() below
+      // could reshuffle or overwrite, so copy the key out first (same
+      // reasoning as persistActiveTracks()).
+      strncpy(name, cardDb.activeName(), sizeof(name) - 1);
+      name[sizeof(name) - 1] = '\0';
+      targetName = name;
+    } else {
+      // Validate via find()/add() on the name as typed -- no pre-truncation,
+      // so an over-length name is rejected with ErrBadName instead of being
+      // silently chopped down to CARD_NAME_MAX and possibly colliding with
+      // an unrelated existing card.
+      targetName = requestedName;
+      if (cardDb.find(targetName) < 0) {
+        DbStatus st = cardDb.add(targetName, "", "");
+        if (st != DbStatus::Ok) {
+          Serial.print("-ERR ");
+          Serial.println(dbStatusName(st));
+          return true;
+        }
+        isNew = true;
+      }
+    }
+    DbStatus st = cardDb.update(targetName, nullptr, track2);
     if (st != DbStatus::Ok) {
       Serial.print("-ERR ");
       Serial.println(dbStatusName(st));
       return true;
     }
-    loadActiveIntoRam();
+    if (strcmp(targetName, cardDb.activeName()) == 0)
+      loadActiveIntoRam();
+    Serial.print(":name ");
+    Serial.println(targetName);
     Serial.print(":t2 ");
     Serial.println(track2);
-    Serial.println("+OK nfcread stored");
+    Serial.println(isNew ? "+OK nfcread stored (new card)"
+                         : "+OK nfcread stored");
     return true;
   }
 
