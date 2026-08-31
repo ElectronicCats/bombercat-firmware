@@ -66,6 +66,15 @@
 // Longest track magset accepts: fits tracks[128] (+ null).
 #define TRACK_MAX_CHARS (126)
 #define DEBUGCAT
+// How long nfcread waits for a card to enter the field before giving up
+// (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md Phase 4.4). Longer than
+// NfcController::waitForTag()'s 500ms default: this is a manual CLI command,
+// so the user needs time to physically place the card after issuing it.
+// Defined here (rather than alongside Phase 4's other NFC code) because
+// handleCommand() -- which uses it -- is defined earlier in the file, and
+// #define is resolved in file order, unlike Arduino's auto-prototyped
+// function declarations.
+#define NFC_READ_WAIT_TAG_MS (8000)
 
 char tracks[2][128]; // 2 tracks, 128 chars each (max)
 
@@ -661,6 +670,59 @@ static bool handleCommand(const char *verb, char *args) {
     return true;
   }
 
+  // nfcread -- read a physical EMV/Visa card's Track 2 over NFC and store it
+  // as the active card's Track 2 (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md
+  // Phase 4.4). Switches the PN7150 into reader mode, waits up to
+  // NFC_READ_WAIT_TAG_MS for a card to enter the field, then runs the
+  // PPSE/AID/GPO/READ RECORD sequence once. NFC-sourced cards aren't
+  // flagged as such in CardDatabase yet (that's Phase 5); this stores the
+  // extracted Track 2 the same way `magcard set`/`magset` would.
+  if (strcmp(verb, "nfcread") == 0) {
+    if (!cardDb.ready()) {
+      Serial.println("-ERR not ready");
+      return true;
+    }
+    if (!resetNfc(false)) {
+      Serial.println("-ERR nfc reader mode failed");
+      return true;
+    }
+    if (!nfc.waitForTag(NFC_READ_WAIT_TAG_MS)) {
+      Serial.println("-ERR no card detected");
+      return true;
+    }
+    uint8_t packed[19];
+    uint8_t packedLen = readVisaTrack2(packed, sizeof(packed));
+    if (packedLen == 0) {
+      Serial.println("-ERR track 2 not found");
+      return true;
+    }
+    char track2[TRACK_MAX_CHARS + 2];
+    if (!unpackTrack2Equivalent(packed, packedLen, track2, sizeof(track2))) {
+      Serial.println("-ERR track 2 decode failed");
+      return true;
+    }
+    const char *verr = validateTrack(2, track2);
+    if (verr != nullptr) {
+      Serial.print("-ERR ");
+      Serial.println(verr);
+      return true;
+    }
+    char name[CARD_NAME_MAX + 1];
+    strncpy(name, cardDb.activeName(), sizeof(name) - 1);
+    name[sizeof(name) - 1] = '\0';
+    DbStatus st = cardDb.update(name, nullptr, track2);
+    if (st != DbStatus::Ok) {
+      Serial.print("-ERR ");
+      Serial.println(dbStatusName(st));
+      return true;
+    }
+    loadActiveIntoRam();
+    Serial.print(":t2 ");
+    Serial.println(track2);
+    Serial.println("+OK nfcread stored");
+    return true;
+  }
+
   return false;
 }
 
@@ -857,6 +919,197 @@ bool emulateVisaMSD() {
     i++;
   }
   Serial.println("nfcvisa: MSD emulation complete");
+  return true;
+}
+
+// --- Track 2 extraction from a real card
+// (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md Phase 4) ---------------------
+
+// Reader-mode APDU commands for the Visa flow, ported verbatim from
+// hunterCatNFC_AllOne.ino:239-242 (seekTrack2()): PPSE SELECT, VISA AID
+// SELECT, GPO with no PDOL (the fallback when the card's AID SELECT response
+// carries no tag 0x9F38), and READ RECORD for SFI=1 record 1 (the slot Visa
+// MSD/EMV cards carry Track 2 Equivalent Data in).
+static uint8_t READ_PPSE[] = {0x00, 0xA4, 0x04, 0x00, 0x0E, 0x32, 0x50,
+                              0x41, 0x59, 0x2E, 0x53, 0x59, 0x53, 0x2E,
+                              0x44, 0x44, 0x46, 0x30, 0x31, 0x00};
+static uint8_t READ_VISA_AID[] = {0x00, 0xA4, 0x04, 0x00, 0x07, 0xA0, 0x00,
+                                  0x00, 0x00, 0x03, 0x10, 0x10, 0x00};
+static uint8_t READ_GPO_DEFAULT[] = {0x80, 0xA8, 0x00, 0x00,
+                                     0x02, 0x83, 0x00, 0x00};
+static uint8_t READ_RECORD_SFI1[] = {0x00, 0xB2, 0x01, 0x0C, 0x00};
+
+// GPO command built from the card's declared PDOL by treatPDOL(); kept as a
+// global buffer (like hunterCatNFC_AllOne.ino's `ppdol`) since its length is
+// dynamic, set by treatPDOL()'s return value rather than sizeof().
+static uint8_t ppdol[255] = {0x80, 0xA8, 0x00, 0x00, 0x02, 0x83, 0x00};
+
+// Build a GPO command satisfying the card's PDOL (tag 0x9F38's payload, laid
+// out in `apdu` as apdu[0]=length, apdu[1..length]=the PDOL tag/length list)
+// by substituting placeholder values for each recognised terminal data
+// element. Ported verbatim from hunterCatNFC_AllOne.ino:146-215 (Task 4.2);
+// as the source's own comment notes, this only follows the PDOL *format* --
+// the substituted values aren't a real EMV challenge, so a terminal
+// verifying them cryptographically would reject the card. That's fine here:
+// Track 2 Equivalent Data (tag 0x57) doesn't depend on GPO's response being
+// genuine, only on the card accepting a well-formed GPO.
+static uint8_t treatPDOL(uint8_t *apdu) {
+  uint8_t plen = 7;
+  for (uint8_t i = 1; i <= apdu[0]; i++) {
+    if (apdu[i] == 0x9F && apdu[i + 1] == 0x66) {
+      ppdol[plen] = 0xF6;
+      ppdol[plen + 1] = 0x20;
+      ppdol[plen + 2] = 0xC0;
+      ppdol[plen + 3] = 0x00;
+      plen += 4;
+      i += 2;
+    } else if (apdu[i] == 0x9F && apdu[i + 1] == 0x1A) {
+      ppdol[plen] = 0x9F;
+      ppdol[plen + 1] = 0x1A;
+      plen += 2;
+      i += 2;
+    } else if (apdu[i] == 0x5F && apdu[i + 1] == 0x2A) {
+      ppdol[plen] = 0x5F;
+      ppdol[plen + 1] = 0x2A;
+      plen += 2;
+      i += 2;
+    } else if (apdu[i] == 0x9A) {
+      ppdol[plen] = 0x9A;
+      ppdol[plen + 1] = 0x9A;
+      ppdol[plen + 2] = 0x9A;
+      plen += 3;
+      i += 1;
+    } else if (apdu[i] == 0x95) {
+      ppdol[plen] = 0x95;
+      ppdol[plen + 1] = 0x95;
+      ppdol[plen + 2] = 0x95;
+      ppdol[plen + 3] = 0x95;
+      ppdol[plen + 4] = 0x95;
+      plen += 5;
+      i += 1;
+    } else if (apdu[i] == 0x9C) {
+      ppdol[plen] = 0x9C;
+      plen += 1;
+      i += 1;
+    } else if (apdu[i] == 0x9F && apdu[i + 1] == 0x37) {
+      ppdol[plen] = 0x9F;
+      ppdol[plen + 1] = 0x37;
+      ppdol[plen + 2] = 0x9F;
+      ppdol[plen + 3] = 0x37;
+      plen += 4;
+      i += 2;
+    } else {
+      uint8_t u = apdu[i + 2];
+      while (u > 0) {
+        ppdol[plen] = 0;
+        plen += 1;
+        u--;
+      }
+      i += 2;
+    }
+  }
+  ppdol[4] = (plen + 2) - 7; // length of PDOL + 2
+  ppdol[6] = plen - 7;       // real length
+  plen++;                    // +1 for the trailing 0
+  ppdol[plen] = 0x00;
+  return plen;
+}
+
+// Read a physical EMV/Visa card's Track 2 Equivalent Data (tag 0x57) over
+// NFC-A/ISO-DEP: PPSE SELECT -> VISA AID SELECT -> GPO (PDOL-aware) -> READ
+// RECORD SFI=1. Ported from hunterCatNFC_AllOne.ino:234-293 (seekTrack2()),
+// dropping its serial debug prints and its infinite 4-command retry loop (a
+// single attempt here; the caller decides whether to retry). Assumes a tag
+// is already in the field (call nfc.waitForTag() first) and the PN7150 is
+// in reader mode. Returns the packed length (same BCD-nibble format
+// buildVisaTrack2Record() emits, Phase 3) written to `out`, or 0 on any
+// transceive failure, a malformed/truncated PDOL, or a missing tag 0x57.
+static uint8_t readVisaTrack2(uint8_t *out, uint8_t outCap) {
+  uint8_t resp[255], respLen;
+
+  if (!nfc.readerTransceive(READ_PPSE, sizeof(READ_PPSE), resp, &respLen))
+    return 0;
+
+  if (!nfc.readerTransceive(READ_VISA_AID, sizeof(READ_VISA_AID), resp,
+                            &respLen))
+    return 0;
+
+  uint8_t *gpoCmd = READ_GPO_DEFAULT;
+  uint8_t gpoLen = sizeof(READ_GPO_DEFAULT);
+  for (uint8_t u = 0; u + 2 < respLen; u++) {
+    if (resp[u] == 0x9F && resp[u + 1] == 0x38) {
+      uint8_t pdolLen = resp[u + 2];
+      // Bail out (keep the no-PDOL default GPO) rather than trust a
+      // malformed/truncated PDOL length: without this check a card claiming
+      // a PDOL longer than what's actually in `resp` would make the copy
+      // loop below read past the end of the 255-byte `resp` buffer.
+      if (pdolLen >= 50 || u + 2 + pdolLen >= respLen)
+        break;
+      uint8_t pdol[50];
+      for (uint8_t e = 0; e <= pdolLen; e++)
+        pdol[e] = resp[u + e + 2];
+      gpoLen = treatPDOL(pdol);
+      gpoCmd = ppdol;
+      break;
+    }
+  }
+
+  if (!nfc.readerTransceive(gpoCmd, gpoLen, resp, &respLen))
+    return 0;
+
+  if (!nfc.readerTransceive(READ_RECORD_SFI1, sizeof(READ_RECORD_SFI1), resp,
+                            &respLen))
+    return 0;
+
+  for (uint8_t u = 0; u + 1 < respLen; u++) {
+    uint8_t tagLen = resp[u + 1];
+    if (resp[u] == 0x57 && u + 2 + tagLen <= respLen) {
+      if (tagLen > outCap)
+        return 0;
+      memcpy(out, &resp[u + 2], tagLen);
+      return tagLen;
+    }
+  }
+  return 0;
+}
+
+// Inverse of packTrack2Equivalent() (Phase 3): unpack EMV tag 0x57's BCD
+// nibbles back into an ISO/ABA Track 2 string (";PAN=discretionary?", the
+// format CardDatabase stores), so an NFC-extracted card can be replayed over
+// the MagSpoof coil like any other stored card. 0xD unpacks to the '='
+// PAN/discretionary-data separator; a trailing 0xF pad nibble (added by
+// packTrack2Equivalent() for an odd digit count) ends the string early.
+// Writes into `out` (capacity `outCap`) and returns false if the data
+// contains an invalid nibble or doesn't fit.
+static bool unpackTrack2Equivalent(const uint8_t *data, uint8_t len, char *out,
+                                   size_t outCap) {
+  if (outCap < 3) // ';' + at least one digit + '?' + NUL
+    return false;
+  size_t o = 0;
+  out[o++] = ';';
+  bool done = false;
+  for (uint8_t i = 0; i < len && !done; i++) {
+    uint8_t nibbles[2] = {(uint8_t)(data[i] >> 4), (uint8_t)(data[i] & 0x0F)};
+    for (uint8_t half = 0; half < 2 && !done; half++) {
+      uint8_t nib = nibbles[half];
+      if (nib == 0xF) {
+        done = true;
+        break;
+      }
+      char c;
+      if (nib == 0xD)
+        c = '=';
+      else if (nib <= 9)
+        c = (char)('0' + nib);
+      else
+        return false;     // invalid nibble
+      if (o + 3 > outCap) // this char + '?' + NUL must still fit
+        return false;
+      out[o++] = c;
+    }
+  }
+  out[o++] = '?';
+  out[o] = '\0';
   return true;
 }
 
