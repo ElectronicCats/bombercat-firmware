@@ -25,6 +25,7 @@
 #include <BomberCatControl.h>
 
 #include "CardDatabase.h"
+#include "Log.h"
 #include "NfcController.h"
 
 // 1.2.3.0: two-track cards now play TRACK 2 by default (playActiveCard/button
@@ -1024,15 +1025,40 @@ static uint8_t treatPDOL(uint8_t *apdu) {
 // in reader mode. Returns the packed length (same BCD-nibble format
 // buildVisaTrack2Record() emits, Phase 3) written to `out`, or 0 on any
 // transceive failure, a malformed/truncated PDOL, or a missing tag 0x57.
+// Scan a raw APDU response `data`/`len` for EMV tag 0x57 (Track 2 Equivalent
+// Data) and copy its value into `out` (capacity `outCap`). Returns the tag's
+// length on a fit, 0 if the tag isn't present, or 0xFF if it's present but
+// longer than `outCap` (safe sentinel: a real Track 2 Equivalent Data value
+// never approaches 255 bytes).
+static uint8_t findTrack2Tag(const uint8_t *data, uint8_t len, uint8_t *out,
+                             uint8_t outCap) {
+  for (uint8_t u = 0; u + 1 < len; u++) {
+    uint8_t tagLen = data[u + 1];
+    if (data[u] == 0x57 && u + 2 + tagLen <= len) {
+      if (tagLen > outCap)
+        return 0xFF;
+      memcpy(out, &data[u + 2], tagLen);
+      return tagLen;
+    }
+  }
+  return 0;
+}
+
 static uint8_t readVisaTrack2(uint8_t *out, uint8_t outCap) {
   uint8_t resp[255], respLen;
 
-  if (!nfc.readerTransceive(READ_PPSE, sizeof(READ_PPSE), resp, &respLen))
+  if (!nfc.readerTransceive(READ_PPSE, sizeof(READ_PPSE), resp, &respLen)) {
+    LOG_WARN("nfcread: PPSE SELECT got no response (card pulled away too "
+             "soon, or doesn't support contactless PPSE)");
     return 0;
+  }
 
   if (!nfc.readerTransceive(READ_VISA_AID, sizeof(READ_VISA_AID), resp,
-                            &respLen))
+                            &respLen)) {
+    LOG_WARN("nfcread: VISA AID SELECT got no response (PPSE didn't list "
+             "the VISA AID, or the card dropped out of the field)");
     return 0;
+  }
 
   uint8_t *gpoCmd = READ_GPO_DEFAULT;
   uint8_t gpoLen = sizeof(READ_GPO_DEFAULT);
@@ -1054,22 +1080,55 @@ static uint8_t readVisaTrack2(uint8_t *out, uint8_t outCap) {
     }
   }
 
-  if (!nfc.readerTransceive(gpoCmd, gpoLen, resp, &respLen))
+  if (!nfc.readerTransceive(gpoCmd, gpoLen, resp, &respLen)) {
+    LOG_WARN("nfcread: GPO got no response (card rejected the synthesized "
+             "PDOL values, or dropped out of the field)");
     return 0;
-
-  if (!nfc.readerTransceive(READ_RECORD_SFI1, sizeof(READ_RECORD_SFI1), resp,
-                            &respLen))
-    return 0;
-
-  for (uint8_t u = 0; u + 1 < respLen; u++) {
-    uint8_t tagLen = resp[u + 1];
-    if (resp[u] == 0x57 && u + 2 + tagLen <= respLen) {
-      if (tagLen > outCap)
-        return 0;
-      memcpy(out, &resp[u + 2], tagLen);
-      return tagLen;
-    }
   }
+
+  // A GPO response comes in one of two EMV formats: Format 1 (outer tag
+  // 0x80) carries only the AIP + AFL, telling the terminal which SFI/record
+  // to READ RECORD next; Format 2 (outer tag 0x77) instead carries every
+  // data element -- AIP, and often Track 2 Equivalent Data itself -- inline,
+  // with no AFL at all. Real VISA contactless (qVSDC) cards commonly answer
+  // Format 2, so check the GPO response for tag 0x57 first and skip READ
+  // RECORD entirely when it's already there -- issuing READ RECORD SFI1/
+  // record1 against a Format 2 card has nothing to find (that record doesn't
+  // exist) and the card answers 6A 83 "record not found".
+  uint8_t gpoTagLen = findTrack2Tag(resp, respLen, out, outCap);
+  if (gpoTagLen == 0xFF) {
+    LOG_WARN("nfcread: tag 0x57 (Track 2 Equivalent Data) found in the GPO "
+             "response but too long for the read buffer");
+    return 0;
+  }
+  if (gpoTagLen != 0)
+    return gpoTagLen;
+
+  // Format 1 (or a Format 2 card that simply didn't inline it): fall back to
+  // the SFI1/record1 guess.
+  if (!nfc.readerTransceive(READ_RECORD_SFI1, sizeof(READ_RECORD_SFI1), resp,
+                            &respLen)) {
+    LOG_WARN("nfcread: READ RECORD (SFI 1, rec 1) got no response");
+    return 0;
+  }
+
+  uint8_t recTagLen = findTrack2Tag(resp, respLen, out, outCap);
+  if (recTagLen == 0xFF) {
+    LOG_WARN("nfcread: tag 0x57 (Track 2 Equivalent Data) found but too "
+             "long for the read buffer");
+    return 0;
+  }
+  if (recTagLen != 0)
+    return recTagLen;
+
+  LOG_WARN("nfcread: neither the GPO response nor READ RECORD (SFI 1, rec 1) "
+           "carried tag 0x57 (Track 2 Equivalent Data) - this card may keep "
+           "it in a different SFI/record, or has no MSD/qVSDC fallback at "
+           "all");
+  // The last two bytes are the APDU status word (90 00 = success; e.g.
+  // 6A 83 = "record not found").
+  Log::hex(LogLevel::Warn, "nfcread: READ RECORD (SFI1 rec1) response", resp,
+           respLen);
   return 0;
 }
 
@@ -1126,6 +1185,13 @@ void setup() {
   while (!Serial)
     ;
 
+  // Warn-level by default: LATENCIA_OPTIMIZACION.md found Debug-level logging
+  // on every relayed APDU added real per-transaction latency. readVisaTrack2()
+  // below logs its per-step nfcread failures at Warn so `bombercat magspoof nfc
+  // read -v` shows exactly which APDU in the PPSE/AID/GPO/READ RECORD sequence
+  // failed, instead of the single generic "track 2 not found".
+  Log::begin(Serial, LogLevel::Warn);
+
   // blink to show we started up
   blink(L1, 200, 2);
 
@@ -1138,7 +1204,7 @@ void setup() {
     Serial.print("Active card: ");
     Serial.println(cardDb.activeName());
   } else {
-    Serial.println("Card store init failed — using RAM defaults");
+    Serial.println("Card store init failed - using RAM defaults");
     strcpy(tracks[0], DEFAULT_TRACK1);
     strcpy(tracks[1], DEFAULT_TRACK2);
   }
