@@ -8,7 +8,8 @@
  */
 #include "FlashStorage.h"
 
-#include <stdio.h> // snprintf
+#include <stdio.h>  // snprintf
+#include <string.h> // memcpy, memset
 
 #include <FlashIAPBlockDevice.h>
 #include <TDBStore.h>
@@ -20,6 +21,19 @@ using namespace mbed;
 namespace {
 // TDBStore key holding the ConfigData blob.
 const char kConfigKey[] = "mag_cfg";
+
+// CardEntry layout from before IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md
+// Phase 5 (CONFIG_VERSION 2), kept only so FlashStorage::readCard() can
+// recognise and migrate records written by older firmware instead of
+// dropping them (clarifying question 5: a size/version bump must not lose
+// existing cards).
+struct LegacyCardEntryV2 {
+  char name[CARD_NAME_MAX + 1];
+  char track1[TRACK_MAX_CHARS + 2];
+  char track2[TRACK_MAX_CHARS + 2];
+  uint32_t crc32;
+  bool valid;
+};
 } // namespace
 
 FlashStorage::~FlashStorage() {
@@ -112,14 +126,45 @@ bool FlashStorage::readCard(uint8_t index, CardEntry &out) {
   CardEntry tmp{};
   size_t actual = 0;
   int rc = _store->get(key, &tmp, sizeof(tmp), &actual);
-  if (rc != MBED_SUCCESS || actual != sizeof(tmp))
-    return false; // absent or wrong layout
-  if (!tmp.valid)
+  if (rc != MBED_SUCCESS)
+    return false; // absent
+
+  if (actual == sizeof(tmp)) {
+    if (!tmp.valid)
+      return false; // tombstone
+    if (tmp.crc32 != cardCrc32(tmp))
+      return false; // corrupt
+    out = tmp;
+    return true;
+  }
+
+  // Not the current layout's size: check for a pre-Phase-5 (CONFIG_VERSION 2)
+  // record and migrate it forward. Anything else is an unknown/corrupt
+  // layout and is dropped, same as before.
+  if (actual != sizeof(LegacyCardEntryV2))
+    return false;
+
+  LegacyCardEntryV2 legacy{};
+  size_t legacyActual = 0;
+  rc = _store->get(key, &legacy, sizeof(legacy), &legacyActual);
+  if (rc != MBED_SUCCESS || legacyActual != sizeof(legacy))
+    return false;
+  if (!legacy.valid)
     return false; // tombstone
-  if (tmp.crc32 != cardCrc32(tmp))
+  if (legacy.crc32 != magCrc32(&legacy, offsetof(LegacyCardEntryV2, crc32)))
     return false; // corrupt
 
-  out = tmp;
+  memset(&out, 0, sizeof(out));
+  memcpy(out.name, legacy.name, sizeof(out.name));
+  memcpy(out.track1, legacy.track1, sizeof(out.track1));
+  memcpy(out.track2, legacy.track2, sizeof(out.track2));
+  out.nfcEnabled = false;
+  out.selResMode = 0; // no-chip/MSD: matches pre-NFC playback behavior
+  out.valid = true;
+  out.crc32 = cardCrc32(out);
+
+  // Rewrite in the current layout so this record only needs migrating once.
+  writeCard(index, out);
   return true;
 }
 
