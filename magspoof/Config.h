@@ -29,17 +29,30 @@
 #define MAX_CARDS 50
 #define CARD_NAME_MAX 31    // usable chars; +1 for the NUL terminator
 #define TRACK_MAX_CHARS 126 // matches magset's limit in magspoof.ino
-#define CONFIG_VERSION 2
+// v3 (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md Phase 5) adds nfcEnabled/
+// selResMode to CardEntry. FlashStorage::readCard() migrates v2 records
+// forward in place on first read (clarifying question 5), so this bump does
+// not require a factory reset -- see CardDatabase::begin().
+#define CONFIG_VERSION 3
 
 // A single stored card. POD so it can be written to TDBStore as a raw blob.
-// name/track1/track2 are contiguous at the top of the struct and are the only
-// bytes covered by crc32 (see cardCrc32); keep them first and do not reorder.
+// name/track1/track2/nfcEnabled/selResMode are contiguous at the top of the
+// struct and are the only bytes covered by crc32 (see cardCrc32); keep them
+// first and do not reorder.
 struct CardEntry {
   char name[CARD_NAME_MAX + 1];     // NUL-terminated identifier ("BBVA", ...)
   char track1[TRACK_MAX_CHARS + 2]; // '%'...'?' + NUL  (128 bytes)
   char track2[TRACK_MAX_CHARS + 2]; // ';'...'?' + NUL  (128 bytes)
-  uint32_t crc32;                   // integrity over name+track1+track2
-  bool valid;                       // false = tombstone / unused slot
+  // Per-card SEL_RES preference (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md
+  // Phase 5). nfcEnabled=false means "no explicit preference": NFC mode
+  // switches (resetNfc() in magspoof.ino) fall back to their own default
+  // (chip for reader mode, no-chip for MSD emulation) instead of reading
+  // selResMode. selResMode is only meaningful when nfcEnabled is true:
+  // 0 = no-chip/MSD (SEL_RES 0x13), 1 = chip/EMV (SEL_RES 0x33).
+  bool nfcEnabled;
+  uint8_t selResMode;
+  uint32_t crc32; // integrity over the fields above
+  bool valid;     // false = tombstone / unused slot
 };
 
 // Store-wide metadata, persisted in its own key. Mirrors the RAM cache the
