@@ -84,8 +84,6 @@
 
 char tracks[2][128]; // 2 tracks, 128 chars each (max)
 
-const int sublen[] = {32, 48, 48};
-
 const int bitlen[] = {7, 5, 5};
 
 int dir;
@@ -194,6 +192,20 @@ void playBit(int sendBit) {
   delayMicroseconds(CLOCK_US);
 }
 
+// ISO/IEC 7813 Track 2 5-bit encoding (4 data bits + 1 odd parity, parity
+// added by emitTrackForward's crc logic). The BCD table for the accepted
+// char range (0x30-0x3F, enforced by validateTrack) is a straight linear
+// offset from ASCII: '0'-'9' -> 0-9, ':' -> 10, ';' (start sentinel) -> 11,
+// '<' -> 12, '=' (field separator) -> 13, '>' -> 14, '?' (end sentinel) -> 15.
+static uint8_t encodeTrack2Char(char c) { return (uint8_t)(c - '0'); }
+
+// ISO/IEC 7811-2 Track 1 6-bit encoding (parity added by emitTrackForward's
+// crc logic). The alphanumeric code table for the accepted char range
+// (0x20-0x5F, enforced by validateTrack) is a straight linear offset from
+// ASCII: ' ' -> 0, ..., '%' (start sentinel) -> 5, ..., '0'-'9' -> 16-25,
+// ..., 'A'-'Z' -> 33-58, ..., '?' (end sentinel) -> 31, '^' -> 38, '_' -> 63.
+static uint8_t encodeTrack1Char(char c) { return (uint8_t)(c - 0x20); }
+
 // Emit one track forward: leading clock zeros, the track's F2F characters and
 // the LRC byte. `idx` is the 0-based track index. Leaves the field running (no
 // trailing zeros / no pins-low) so the caller decides when to drop the field
@@ -207,7 +219,11 @@ static void emitTrackForward(int idx) {
 
   for (int i = 0; tracks[idx][i] != '\0'; i++) {
     crc = 1;
-    tmp = tracks[idx][i] - sublen[idx];
+    if (idx == 0) {
+      tmp = encodeTrack1Char(tracks[idx][i]);
+    } else {
+      tmp = encodeTrack2Char(tracks[idx][i]);
+    }
 
     for (int j = 0; j < bitlen[idx] - 1; j++) {
       crc ^= tmp & 1;
@@ -327,8 +343,8 @@ static void rstripArgs(char *s) {
 // Shared ISO-track validation for `magset` and `magcard set`: returns nullptr
 // when `data` is a valid track for `track` (1 or 2), else a short error slug
 // for a "-ERR <slug>" reply. Enforces the sentinels, length, and the F2F
-// charset (playTrack() keeps only bitlen-1 bits after subtracting sublen, so a
-// character outside the range would be silently mangled on the wire).
+// charset (encodeTrack1Char/encodeTrack2Char map each char to its ISO 7813/
+// 7811 5/7-bit value; invalid chars are rejected here).
 static const char *validateTrack(int track, const char *data) {
   size_t len = strlen(data);
   if (len > TRACK_MAX_CHARS)
