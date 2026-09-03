@@ -55,7 +55,7 @@
 // (IMPLEMENTATION_PLAN_MagSpoof_Flash.md, Phase 3). Older images answer
 // `magcard` with "-ERR unknown command", which is how bombercat-tools tells a
 // pre-flash firmware apart and prompts a reflash.
-#define BOMBERCAT_FW_VERSION "1.2.4.0"
+#define BOMBERCAT_FW_VERSION "1.2.0.0"
 
 #define L1 (LED_BUILTIN) // LED1
 #define PIN_A (6)        // MagSpoof-1

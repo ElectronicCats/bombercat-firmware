@@ -31,7 +31,7 @@
 #include "Electroniccats_PN7150.h"
 #include <BomberCatControl.h>
 
-#define BOMBERCAT_FW_VERSION "1.1.1.0"
+#define BOMBERCAT_FW_VERSION "1.2.0.0"
 
 #define PN7150_IRQ (11)
 #define PN7150_VEN (13)
