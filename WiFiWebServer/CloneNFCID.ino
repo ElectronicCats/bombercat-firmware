@@ -1,3 +1,5 @@
+#include <HexUtils.h>
+
 void printData(uint8_t *buff, uint8_t lenbuffer, uint8_t cmd) {
   char tmp[1];
   if (cmd == 1)
