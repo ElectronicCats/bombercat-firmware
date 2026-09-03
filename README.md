@@ -12,7 +12,8 @@ ESP32/NINA WiFi co-processor.
 bombercat-firmware/
 ├── core/                   # BomberCatCore — shared Arduino library (NFCGate relay stack)
 ├── NFCGate/                # ★ Main relay firmware (NFCGate-compatible, both READER + CARD roles)
-├── DetectTags/             # NFC tag reader / UID dumper
+├── DetectTags/               # NFC tag reader / UID dumper
+├── DetectReaders/            # NFC reader detector / fingerprinter (security sensor)
 ├── magspoof/               # Magnetic-stripe emulator (single card, button-triggered)
 ├── MagspoofCVSAttack/      # MagSpoof variant that replays a CSV track dataset
 ├── MagSpoofMqtt/           # Networked MagSpoof — receives tracks via MQTT over WiFi
@@ -52,6 +53,18 @@ See [`NFCGate/README.md`](NFCGate/README.md) for build, configuration, and usage
 Lightweight NFC diagnostic firmware. Polls the PN7150 RF field continuously and prints the
 technology and UID of any detected tag (ISO 14443-A/B, ISO 15693, FeliCa, …) over USB serial.
 No relay or emulation logic.
+
+### DetectReaders
+
+Security-sensor counterpart to DetectTags. The PN7150 runs in card-emulation (listen) mode
+presenting an emulated contactless card; when an external reader or terminal enters the field
+and activates it, the firmware reports the reader's polling technology, protocol and interface
+over USB serial, exchanges APDUs during a bounded dwell window, and fingerprints the first
+command (PPSE → EMV payment terminal; known AIDs → Visa/Mastercard/Amex/NDEF readers). Each
+detection is emitted as a structured `:reader` serial event — same marker conventions as
+DetectTags' `:tag`, ready for `bombercat-tools` — alongside human-readable text. The board
+answers the standard `ping`/`info`/`identify` control REPL and re-arms automatically after
+every session.
 
 ### magspoof
 
@@ -121,6 +134,14 @@ are configured in `.pre-commit-config.yaml`.
 Board design (KiCad, BOM, mechanical files):
 
 **<https://github.com/ElectronicCats/BomberCat>**
+
+---
+
+## Disclaimer
+>[!IMPORTANT]
+>BomberCat is a wireless penetration testing tool intended **solely for use in authorized security audits, where such usage is permitted by applicable laws and regulations**. Before utilizing this tool, it is crucial to ensure compliance with all relevant legal requirements and obtain appropriate permissions from the relevant authorities.
+>
+>The board **does not provide** any means or authorization to utilize credit cards or engage in any financial transactions that are not legally authorized. **Electronic Cats holds no responsibility for any unauthorized use of the tool or any resulting damages**.
 
 ---
 

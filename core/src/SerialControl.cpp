@@ -11,8 +11,10 @@
 #include "Log.h"
 
 SerialControl::SerialControl(Stream &io, ConfigStore &store, RelayConfig &cfg,
-                             RelayEngine &engine, const char *fwVersion)
-    : _io(io), _store(store), _cfg(cfg), _engine(engine), _fw(fwVersion) {}
+                             RelayEngine &engine, const char *fwVersion,
+                             const char *fwName)
+    : _io(io), _store(store), _cfg(cfg), _engine(engine), _fw(fwVersion),
+      _name(fwName) {}
 
 void SerialControl::begin() {
   _len = 0;
@@ -126,6 +128,7 @@ void SerialControl::dispatch(char *line) {
     ok("bombercat");
   } else if (strcmp(verb, "info") == 0) {
     kv("fw", _fw);
+    kv("fw_name", _name);
     kv("role", roleName());
     kv("ssid", _cfg.ssid);
     kv("server", _cfg.server);
@@ -136,6 +139,8 @@ void SerialControl::dispatch(char *line) {
   } else if (strcmp(verb, "get") == 0) {
     if (strcmp(args, "fw") == 0) {
       kv("fw", _fw);
+    } else if (strcmp(args, "fw_name") == 0) {
+      kv("fw_name", _name);
     } else if (strcmp(args, "role") == 0) {
       kv("role", roleName());
     } else if (strcmp(args, "ssid") == 0) {

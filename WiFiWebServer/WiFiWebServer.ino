@@ -38,6 +38,9 @@ Electronic Cats https://github.com/ElectronicCats/BomberCat
 #include "main.js.h"
 #include "nfc.html.h"
 #include "styles.css.h"
+#include <BomberCatControl.h>
+
+#define BOMBERCAT_FW_VERSION "1.1.1.0"
 
 // #define DEBUG
 
@@ -61,6 +64,9 @@ bool rebootFlag = false;
 unsigned long rebootTimer = 0;
 
 Debug debug;
+// BomberCat serial-control REPL (ping/info/identify) for bombercat-tools.
+// Shares the Serial port with Debug; the CLI ignores non-marker log lines.
+BomberCatControl control(Serial, BOMBERCAT_FW_VERSION, "nfcgate_wifiwebserver");
 Preferences preferences;
 ezButton button(NPIN);
 
@@ -80,7 +86,7 @@ void runServer();
 void showPageContent(WiFiClient client, const char *pageContent);
 
 void setup() {
-  Serial.begin(9600); // Initialize serial communications with the PC
+  Serial.begin(115200); // Initialize serial communications with the PC
 
 #ifdef DEBUG
   debug.setEnabled(true);
@@ -119,10 +125,13 @@ void setup() {
   setupMagspoof();
   setupTracks();
   setupNFC();
+
+  control.begin(); // announce readiness to the host CLI
 }
 
 void loop() {
   static unsigned long lastTime = millis();
+  control.poll(); // service host CLI commands (ping/info/identify)
   debug.setEnabled(preferences.getBool("debug", false));
 
   runServer(); // Listen for incoming clients and serve the page content when
@@ -181,9 +190,9 @@ void setupWiFi() {
   // Check for the WiFi module
   if (WiFi.status() == WL_NO_MODULE) {
     debug.println("Communication with WiFi module failed!");
-    // don't continue
-    while (true)
-      ;
+    // Non-fatal: keep the control REPL (ping/info/identify) alive so the board
+    // stays discoverable by bombercat-tools even when WiFi is unavailable.
+    return;
   }
 
   // Set a static IP address
@@ -204,9 +213,11 @@ void setupWiFi() {
   status = WiFi.beginAP(ssid.c_str(), password.c_str());
   if (status != WL_AP_LISTENING) {
     debug.println("Creating access point failed");
-    // don't continue
-    while (true)
-      ;
+    // Non-fatal: a failed AP (e.g. outdated onboard NINA WiFi firmware, which
+    // returns WL_AP_FAILED) must not brick the board. Bail out of WiFi setup so
+    // setup() finishes and the control REPL runs; the web UI is unavailable
+    // until the AP works, but the board stays discoverable/identifiable.
+    return;
   }
 
   server.begin();

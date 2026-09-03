@@ -27,8 +27,11 @@
 */
 #include "arduino_secrets.h"
 #include <ArduinoJson.h>
+#include <BomberCatControl.h>
 #include <PubSubClient.h>
 #include <WiFiNINA.h>
+
+#define BOMBERCAT_FW_VERSION "1.1.1.0"
 // Update these with values suitable for your network.
 
 const char *ssid = ssidName;
@@ -178,6 +181,9 @@ void reconnect() {
   }
 }
 
+// BomberCat serial-control REPL (ping/info/identify) for bombercat-tools.
+BomberCatControl control(Serial, BOMBERCAT_FW_VERSION, "magspoofmqtt");
+
 void setup() {
   pinMode(PIN_A, OUTPUT);
   pinMode(PIN_B, OUTPUT);
@@ -185,16 +191,20 @@ void setup() {
   pinMode(NPIN, INPUT_PULLUP);
   pinMode(13, OUTPUT); // Initialize the BUILTIN_LED pin as an output
 
+  // Serial must come up before setup_wifi(), which logs over Serial.
+  Serial.begin(115200);
+  while (!Serial)
+    ;
+
   setup_wifi();
   client.setServer(mqtt_server, 1883);
   client.setCallback(callback);
-  Serial.begin(9600);
-  while (!Serial)
-    ;
 
   // blink to show we started up
   blink(L1, 200, 2);
   Serial.println("Ready MQTT MagSpoof");
+
+  control.begin(); // announce readiness to the host CLI
 }
 
 void blink(int pin, int msdelay, int times) {
@@ -328,6 +338,7 @@ void magspoof() {
 }
 
 void loop() {
+  control.poll(); // service host CLI commands (ping/info/identify)
   if (!client.connected()) {
     reconnect();
   }

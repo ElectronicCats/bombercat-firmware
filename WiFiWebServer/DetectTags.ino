@@ -16,6 +16,8 @@
  * Distributed as-is; no warranty is given.
  */
 
+#include <HexUtils.h>
+
 void clearTagValues() {
   emulateNFCFlag = false;
   pollMode = "Waiting for NFC tag";
@@ -57,7 +59,7 @@ void resetMode() { // Reset the configuration mode after each reading
   nfc.startDiscovery(); // NCI Discovery mode
 }
 
-// TODO: replace PrintBuf by getHexRepresentation
+// TODO: replace PrintBuf by HexUtils::print
 void PrintBuf(const byte *data,
               const uint32_t numBytes) { // Print hex data buffer in format
   uint32_t szPos;
@@ -72,20 +74,6 @@ void PrintBuf(const byte *data,
     }
   }
   Serial.println();
-}
-
-String getHexRepresentation(const byte *data, const uint32_t numBytes) {
-  String hexString;
-  for (uint32_t szPos = 0; szPos < numBytes; szPos++) {
-    hexString += "0x";
-    if (data[szPos] <= 0xF)
-      hexString += "0";
-    hexString += String(data[szPos] & 0xFF, HEX);
-    if ((numBytes > 1) && (szPos != numBytes - 1)) {
-      hexString += " ";
-    }
-  }
-  return hexString;
 }
 
 void displayCardInfo() { // Funtion in charge to show the card/s in te field
@@ -119,14 +107,14 @@ void displayCardInfo() { // Funtion in charge to show the card/s in te field
     case (nfc.tech.PASSIVE_NFCA):
 
       debug.print("\tSENS_RES = ");
-      sensRes = getHexRepresentation(nfc.remoteDevice.getSensRes(),
-                                     nfc.remoteDevice.getSensResLen());
+      sensRes = HexUtils::toString(nfc.remoteDevice.getSensRes(),
+                                   nfc.remoteDevice.getSensResLen());
       debug.println(sensRes);
       debug.println(" ");
 
       debug.print("\tNFCID = ");
-      nfcID = getHexRepresentation(nfc.remoteDevice.getNFCID(),
-                                   nfc.remoteDevice.getNFCIDLen());
+      nfcID = HexUtils::toString(nfc.remoteDevice.getNFCID(),
+                                 nfc.remoteDevice.getNFCIDLen());
       debug.println(nfcID);
       debug.println(" ");
 
@@ -142,7 +130,7 @@ void displayCardInfo() { // Funtion in charge to show the card/s in te field
              nfc.remoteDevice.getNFCIDLen());
 
       debug.print("\tUIDCF: ");
-      debug.println(getHexRepresentation(uidcf, uidlen + 10));
+      debug.println(HexUtils::toString(uidcf, uidlen + 10));
 
       // uidcf ready to fill CORE_CONF
       if (nfc.remoteDevice.getNFCIDLen() != 4) {
@@ -153,8 +141,8 @@ void displayCardInfo() { // Funtion in charge to show the card/s in te field
       // SEL_RES
       if (nfc.remoteDevice.getSelResLen() != 0) {
         debug.print("\tSEL_RES = ");
-        selRes = getHexRepresentation(nfc.remoteDevice.getSelRes(),
-                                      nfc.remoteDevice.getSelResLen());
+        selRes = HexUtils::toString(nfc.remoteDevice.getSelRes(),
+                                    nfc.remoteDevice.getSelResLen());
         debug.println(selRes);
         debug.println(" ");
       }
@@ -164,8 +152,8 @@ void displayCardInfo() { // Funtion in charge to show the card/s in te field
     case (nfc.tech.PASSIVE_NFCB):
       if (nfc.remoteDevice.getSensResLen() != 0) {
         debug.print("\tSENS_RES = ");
-        sensRes = getHexRepresentation(nfc.remoteDevice.getSensRes(),
-                                       nfc.remoteDevice.getSensResLen());
+        sensRes = HexUtils::toString(nfc.remoteDevice.getSensRes(),
+                                     nfc.remoteDevice.getSensResLen());
         debug.println(sensRes);
       }
       break;
@@ -180,8 +168,8 @@ void displayCardInfo() { // Funtion in charge to show the card/s in te field
       // SENS_RES
       if (nfc.remoteDevice.getSensResLen() != 0) {
         debug.print("\tSENS_RES = ");
-        sensRes = getHexRepresentation(nfc.remoteDevice.getSensRes(),
-                                       nfc.remoteDevice.getSensResLen());
+        sensRes = HexUtils::toString(nfc.remoteDevice.getSensRes(),
+                                     nfc.remoteDevice.getSensResLen());
         debug.println(sensRes);
         debug.println(" ");
       }
@@ -189,8 +177,8 @@ void displayCardInfo() { // Funtion in charge to show the card/s in te field
 
     case (nfc.tech.PASSIVE_NFCV):
       // ID
-      nfcID = getHexRepresentation(nfc.remoteDevice.getID(),
-                                   sizeof(nfc.remoteDevice.getID()));
+      nfcID = HexUtils::toString(nfc.remoteDevice.getID(),
+                                 sizeof(nfc.remoteDevice.getID()));
       debug.print("\tID = ");
       debug.println(nfcID);
 

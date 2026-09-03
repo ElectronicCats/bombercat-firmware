@@ -37,7 +37,7 @@
 
 #include "arduino_secrets.h"
 
-#define BOMBERCAT_FW_VERSION "0.9.7"
+#define BOMBERCAT_FW_VERSION "1.2.0.0"
 
 // Bound the server TCP connect so a host that is reachable but silently drops
 // the SYN fails fast (clean -ERR) instead of hanging tens of seconds and
@@ -55,7 +55,8 @@ NfcGateLink link(wifiClient);
 ConfigStore store;
 RelayConfig cfg;
 RelayEngine engine(nfc, link, cfg);
-SerialControl control(Serial, store, cfg, engine, BOMBERCAT_FW_VERSION);
+SerialControl control(Serial, store, cfg, engine, BOMBERCAT_FW_VERSION,
+                      "nfcgate");
 
 // --- Non-blocking `run` bring-up state machine
 // --------------------------------- `run` is intentionally NOT blocking: it

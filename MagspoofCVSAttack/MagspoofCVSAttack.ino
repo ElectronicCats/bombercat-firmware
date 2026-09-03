@@ -26,6 +26,10 @@
 #include "FlashIAPBlockDevice.h"
 #include "PluggableUSBMSD.h"
 
+#include <BomberCatControl.h>
+
+#define BOMBERCAT_FW_VERSION "1.1.1.0"
+
 #define DEBUG
 #define L1 (LED_BUILTIN) // LED1
 
@@ -218,6 +222,9 @@ void magspoof() {
   delay(400);
 }
 
+// BomberCat serial-control REPL (ping/info/identify) for bombercat-tools.
+BomberCatControl control(Serial, BOMBERCAT_FW_VERSION, "magspoofcvsattack");
+
 void setup() {
   Serial.begin(115200);
   MassStorage.begin();
@@ -269,8 +276,10 @@ void setup() {
   }
   fclose(f);
   Serial.println("MagSpoof Attack End!!");
+
+  control.begin(); // announce readiness to the host CLI
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
+  control.poll(); // service host CLI commands (ping/info/identify)
 }
