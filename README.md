@@ -64,7 +64,7 @@ command (PPSE → EMV payment terminal; known AIDs → Visa/Mastercard/Amex/NDEF
 detection is emitted as a structured `:reader` serial event — same marker conventions as
 DetectTags' `:tag`, ready for `bombercat-tools` — alongside human-readable text. The board
 answers the standard `ping`/`info`/`identify` control REPL and re-arms automatically after
-every session. See [`IMPLEMENTATION_PLAN_DetectReaders.md`](IMPLEMENTATION_PLAN_DetectReaders.md).
+every session.
 
 ### magspoof
 
@@ -134,6 +134,14 @@ are configured in `.pre-commit-config.yaml`.
 Board design (KiCad, BOM, mechanical files):
 
 **<https://github.com/ElectronicCats/BomberCat>**
+
+---
+
+## Disclaimer
+>[!IMPORTANT]
+>BomberCat is a wireless penetration testing tool intended **solely for use in authorized security audits, where such usage is permitted by applicable laws and regulations**. Before utilizing this tool, it is crucial to ensure compliance with all relevant legal requirements and obtain appropriate permissions from the relevant authorities.
+>
+>The board **does not provide** any means or authorization to utilize credit cards or engage in any financial transactions that are not legally authorized. **Electronic Cats holds no responsibility for any unauthorized use of the tool or any resulting damages**.
 
 ---
 
