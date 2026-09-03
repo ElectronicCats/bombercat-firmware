@@ -16,6 +16,7 @@
 
 #include "Electroniccats_PN7150.h"
 #include <BomberCatControl.h>
+#include <HexUtils.h>
 
 #define BOMBERCAT_FW_VERSION "1.2.0.0"
 
@@ -34,7 +35,6 @@ Electroniccats_PN7150
 BomberCatControl control(Serial, BOMBERCAT_FW_VERSION, "detecttags");
 
 // Function prototypes
-String getHexRepresentation(const byte *data, const uint32_t numBytes);
 String getHexCompact(const byte *data, const uint32_t numBytes);
 const char *getProtocolName(unsigned char protocol);
 void emitTagEvent(uint32_t tsMs, const char *tech, const char *protocol,
@@ -114,25 +114,6 @@ void loop() {
     Serial.println("Waiting for a Card...");
     delay(500);
   }
-}
-
-String getHexRepresentation(const byte *data, const uint32_t numBytes) {
-  String hexString;
-
-  if (numBytes == 0) {
-    hexString = "null";
-  }
-
-  for (uint32_t szPos = 0; szPos < numBytes; szPos++) {
-    hexString += "0x";
-    if (data[szPos] <= 0xF)
-      hexString += "0";
-    hexString += String(data[szPos] & 0xFF, HEX);
-    if ((numBytes > 1) && (szPos != numBytes - 1)) {
-      hexString += " ";
-    }
-  }
-  return hexString;
 }
 
 // Compact uppercase hex with no "0x"/separators, e.g. "041A2B3C" - the
@@ -222,16 +203,16 @@ void displayCardInfo() { // Funtion in charge to show the card/s in te field
     case (nfc.tech.PASSIVE_NFCA):
       Serial.println("\tTechnology: NFC-A");
       Serial.print("\tSENS RES = ");
-      Serial.println(getHexRepresentation(nfc.remoteDevice.getSensRes(),
-                                          nfc.remoteDevice.getSensResLen()));
+      Serial.println(HexUtils::toString(nfc.remoteDevice.getSensRes(),
+                                        nfc.remoteDevice.getSensResLen()));
 
       Serial.print("\tNFC ID = ");
-      Serial.println(getHexRepresentation(nfc.remoteDevice.getNFCID(),
-                                          nfc.remoteDevice.getNFCIDLen()));
+      Serial.println(HexUtils::toString(nfc.remoteDevice.getNFCID(),
+                                        nfc.remoteDevice.getNFCIDLen()));
 
       Serial.print("\tSEL RES = ");
-      Serial.println(getHexRepresentation(nfc.remoteDevice.getSelRes(),
-                                          nfc.remoteDevice.getSelResLen()));
+      Serial.println(HexUtils::toString(nfc.remoteDevice.getSelRes(),
+                                        nfc.remoteDevice.getSelResLen()));
 
       emitTagEvent(millis(), "NFC-A", protocolName,
                    getHexCompact(nfc.remoteDevice.getNFCID(),
@@ -243,12 +224,12 @@ void displayCardInfo() { // Funtion in charge to show the card/s in te field
       const unsigned char *sensRes = nfc.remoteDevice.getSensRes();
       unsigned char sensResLen = nfc.remoteDevice.getSensResLen();
       Serial.print("\tSENS RES = ");
-      Serial.println(getHexRepresentation(sensRes, sensResLen));
+      Serial.println(HexUtils::toString(sensRes, sensResLen));
 
       const unsigned char *attribRes = nfc.remoteDevice.getAttribRes();
       unsigned char attribResLen = nfc.remoteDevice.getAttribResLen();
       Serial.println("\tAttrib RES = ");
-      Serial.println(getHexRepresentation(attribRes, attribResLen));
+      Serial.println(HexUtils::toString(attribRes, attribResLen));
 
       // SENSB_RES (ISO14443-3B ATQB): byte 0 = 0x50, bytes 1-4 = PUPI
       // (NFCID0) - the closest thing Type B has to a UID. Confirmed against
@@ -257,7 +238,7 @@ void displayCardInfo() { // Funtion in charge to show the card/s in te field
       String pupiHex = "-";
       if (sensResLen >= 5) {
         Serial.print("\tPUPI = ");
-        Serial.println(getHexRepresentation(&sensRes[1], 4));
+        Serial.println(HexUtils::toString(&sensRes[1], 4));
         pupiHex = getHexCompact(&sensRes[1], 4);
       }
 
@@ -271,7 +252,7 @@ void displayCardInfo() { // Funtion in charge to show the card/s in te field
       const unsigned char *sensRes = nfc.remoteDevice.getSensRes();
       unsigned char sensResLen = nfc.remoteDevice.getSensResLen();
       Serial.print("\tSENS RES = ");
-      Serial.println(getHexRepresentation(sensRes, sensResLen));
+      Serial.println(HexUtils::toString(sensRes, sensResLen));
 
       bool is212 = (nfc.remoteDevice.getBitRate() == 1);
       Serial.print("\tBitrate = ");
@@ -282,7 +263,7 @@ void displayCardInfo() { // Funtion in charge to show the card/s in te field
       String idmHex = "-";
       if (sensResLen >= 9) {
         Serial.print("\tIDm = ");
-        Serial.println(getHexRepresentation(&sensRes[1], 8));
+        Serial.println(HexUtils::toString(&sensRes[1], 8));
         idmHex = getHexCompact(&sensRes[1], 8);
       }
 
@@ -294,8 +275,8 @@ void displayCardInfo() { // Funtion in charge to show the card/s in te field
     case (nfc.tech.PASSIVE_NFCV):
       Serial.println("\tTechnology: NFC-V");
       Serial.print("\tID = ");
-      Serial.println(getHexRepresentation(nfc.remoteDevice.getID(),
-                                          sizeof(nfc.remoteDevice.getID())));
+      Serial.println(HexUtils::toString(nfc.remoteDevice.getID(),
+                                        sizeof(nfc.remoteDevice.getID())));
 
       Serial.print("\tAFI = ");
       Serial.println(nfc.remoteDevice.getAFI());

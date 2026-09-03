@@ -29,7 +29,7 @@ void emulateNFCID() {
     // If Cmd is equal to requestCmd, then the reader is asking for the NFCID
     if (memcmp(Cmd, requestCmd, sizeof(requestCmd)) == 0) {
       Serial.println("Reader is asking for the NFCID");
-      Serial.println("NFCID: " + getHexRepresentation(uidcf, sizeof(uidcf)));
+      Serial.println("NFCID: " + HexUtils::toString(uidcf, sizeof(uidcf)));
     }
   }
 }
