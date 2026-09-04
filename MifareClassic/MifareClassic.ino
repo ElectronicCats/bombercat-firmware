@@ -450,15 +450,19 @@ void handleMifareSector(char *args) {
   replyOk();
 }
 
-// `mifare keys` -> :mifare_key <name> <hex> (one per built-in default key)
-// +OK. Listing only - Decision 4's persisted custom-key store (`mifare keys
-// add/remove`, backed by ConfigStore) is not implemented yet.
+// `mifare keys` -> :mifare_key0/1/2 <name> <hex> (one per built-in default
+// key) +OK. Indexed like `magcard list`'s ':cardN' lines - the host's
+// DeviceLink.command() collects ':key value' replies into a dict keyed by
+// name, so three lines sharing one ":mifare_key" key would collapse to the
+// last one instead of listing all three. Listing only - Decision 4's
+// persisted custom-key store (`mifare keys add/remove`, backed by
+// ConfigStore) is not implemented yet.
 void emitKnownKeys() {
-  replyKv("mifare_key",
+  replyKv("mifare_key0",
           String("default_ff ") + getHexCompact(MIFARE_DEFAULT_KEY_FFFFFF, 6));
-  replyKv("mifare_key",
+  replyKv("mifare_key1",
           String("default_00 ") + getHexCompact(MIFARE_DEFAULT_KEY_000000, 6));
-  replyKv("mifare_key", String("default_a0a1a2 ") +
+  replyKv("mifare_key2", String("default_a0a1a2 ") +
                             getHexCompact(MIFARE_DEFAULT_KEY_A0A1A2A3A4A5, 6));
   replyOk();
 }
