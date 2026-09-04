@@ -1,11 +1,14 @@
 /**
- * BomberCat MifareClassic - Mifare Classic card reader (Phase 1 skeleton).
+ * BomberCat MifareClassic - Mifare Classic card reader.
  *
  * Polls the onboard PN7150 in reader mode; whenever a Mifare Classic card
  * enters the field, reports its UID over USB serial as a structured ":tag"
- * event (same wire format as DetectTags). Authentication and block
- * read/write (Phase 2) and the "mifare ..." REPL commands (Phase 3) are not
- * wired in yet - see MIFARE_CLASSIC_PLAN.md.
+ * event (same wire format as DetectTags), then probes MIFARE_PROBE_BLOCK
+ * with each of the built-in default keys and reports the outcome as a
+ * ":mifare" event (Decision 3, MIFARE_CLASSIC_PLAN.md - a distinct event
+ * type from ":tag" so TagParser stays UID-only). The "mifare ..." REPL
+ * commands for on-demand auth/read/write of an arbitrary block (Phase 3) are
+ * not wired in yet - see MIFARE_CLASSIC_PLAN.md.
  *
  * Distributed as-is; no warranty is given.
  */
@@ -26,11 +29,22 @@ BomberCatControl control(Serial, BOMBERCAT_FW_VERSION, BOMBERCAT_FW_NAME);
 
 static bool tagSessionActive = false; // drives control.state()
 
+// Block probed automatically on every Mifare Classic detection, matching
+// ElectronicCats-PN7150's MifareClassic_read_block.ino example default.
+static const uint8_t MIFARE_PROBE_BLOCK = 4;
+static const uint8_t *const MIFARE_PROBE_KEYS[] = {
+    MIFARE_DEFAULT_KEY_FFFFFF, MIFARE_DEFAULT_KEY_000000,
+    MIFARE_DEFAULT_KEY_A0A1A2A3A4A5};
+static const uint8_t MIFARE_PROBE_KEY_COUNT = 3;
+
 // Function prototypes
 String getHexCompact(const byte *data, const uint32_t numBytes);
 const char *getProtocolName(unsigned char protocol);
 void emitTagEvent(uint32_t tsMs, const char *tech, const char *protocol,
                   const String &uidHex);
+void emitMifareEvent(uint32_t tsMs, const String &uidHex, uint8_t blockNum,
+                     const uint8_t *data, uint8_t dataLen, const char *status);
+void probeMifareBlock(uint32_t tsMs, const String &uidHex);
 void handleTagDetected();
 const char *controlState();
 
@@ -77,6 +91,7 @@ void handleTagDetected() {
     Serial.print("\tUID = ");
     Serial.println(uidHex);
     emitTagEvent(tsMs, "NFC-A", protocolName, uidHex);
+    probeMifareBlock(tsMs, uidHex);
   } else {
     Serial.print(" - Found a card, but it is not Mifare Classic (protocol=");
     Serial.print(protocolName);
@@ -160,4 +175,38 @@ void emitTagEvent(uint32_t tsMs, const char *tech, const char *protocol,
 // Control-plane state reported by `info`.
 const char *controlState() {
   return tagSessionActive ? "tag-detected" : "scanning";
+}
+
+// Structured event for a block probe/read attempt, consumed by a future
+// bombercat-tools MifareParser. Kept separate from ":tag" (Decision 3) so
+// TagParser's UID-only format is untouched. dataHex is "-" when the block
+// wasn't read (e.g. auth failure).
+void emitMifareEvent(uint32_t tsMs, const String &uidHex, uint8_t blockNum,
+                     const uint8_t *data, uint8_t dataLen, const char *status) {
+  Serial.print(":mifare ");
+  Serial.print(tsMs);
+  Serial.print(' ');
+  Serial.print(uidHex);
+  Serial.print(' ');
+  Serial.print(blockNum);
+  Serial.print(' ');
+  Serial.print(dataLen > 0 ? getHexCompact(data, dataLen) : "-");
+  Serial.print(' ');
+  Serial.println(status);
+}
+
+// Try each built-in default key (as Key A) against MIFARE_PROBE_BLOCK and
+// emit the outcome. Read-only - never attempts a write automatically.
+void probeMifareBlock(uint32_t tsMs, const String &uidHex) {
+  uint8_t data[MIFARE_BLOCK_SIZE];
+  uint8_t dataLen = 0;
+  for (uint8_t i = 0; i < MIFARE_PROBE_KEY_COUNT; i++) {
+    if (mifareAuthenticate(nfc, MIFARE_PROBE_BLOCK, MIFARE_KEY_A,
+                           MIFARE_PROBE_KEYS[i]) &&
+        mifareReadBlock(nfc, MIFARE_PROBE_BLOCK, data, &dataLen)) {
+      emitMifareEvent(tsMs, uidHex, MIFARE_PROBE_BLOCK, data, dataLen, "ok");
+      return;
+    }
+  }
+  emitMifareEvent(tsMs, uidHex, MIFARE_PROBE_BLOCK, nullptr, 0, "auth_fail");
 }
