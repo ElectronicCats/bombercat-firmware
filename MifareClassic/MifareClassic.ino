@@ -463,7 +463,7 @@ void emitKnownKeys() {
   replyKv("mifare_key1",
           String("default_00 ") + getHexCompact(MIFARE_DEFAULT_KEY_000000, 6));
   replyKv("mifare_key2", String("default_a0a1a2 ") +
-                            getHexCompact(MIFARE_DEFAULT_KEY_A0A1A2A3A4A5, 6));
+                             getHexCompact(MIFARE_DEFAULT_KEY_A0A1A2A3A4A5, 6));
   replyOk();
 }
 
