@@ -73,7 +73,8 @@ static const uint32_t MIFARE_SESSION_IDLE_MS = 10000;
 static bool awaitingRemoval = false;
 static uint32_t nextRemovalProbeAt = 0;
 static const uint32_t MIFARE_REMOVAL_PROBE_INTERVAL_MS = 500; // vendor cadence
-static const uint16_t MIFARE_REMOVAL_PROBE_TIMEOUT_MS = 200;  // bounded reselect wait
+static const uint16_t MIFARE_REMOVAL_PROBE_TIMEOUT_MS =
+    200; // bounded reselect wait
 
 // Function prototypes
 String getHexCompact(const byte *data, const uint32_t numBytes);
@@ -306,9 +307,14 @@ void probeMifareBlock(uint32_t tsMs, const String &uidHex) {
     }
     // A failed attempt HALTed the card; re-select before the next key, else
     // only MIFARE_PROBE_KEYS[0] is ever really tested (same HALT gotcha the
-    // `mifare check` sweep hits). Skip after the last key — we're about to
-    // report auth_fail regardless.
-    if (i + 1 < MIFARE_PROBE_KEY_COUNT && !mifareReselect(nfc)) {
+    // `mifare check` sweep hits). Also re-select after the LAST key: whatever
+    // the outcome here, handleTagDetected() calls openMifareSession() right
+    // after this function returns, and a HALTed card left over from the final
+    // failed attempt would make the very next self-contained REPL command
+    // (e.g. `mifare sector`, which authenticates once with no retry) fail
+    // against a stale, deselected card instead of reporting a real key
+    // mismatch.
+    if (!mifareReselect(nfc)) {
       break; // card left the field mid-probe; nothing more to try
     }
   }
