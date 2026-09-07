@@ -18,9 +18,15 @@
  * sequence), so the session only needs to keep control.poll() running and
  * auto-close on REPL inactivity (MIFARE_SESSION_IDLE_MS) since there is no
  * cheap non-blocking "is the card still there" check in this library -
- * removal is still only detected via the existing blocking
- * waitForTagRemoval() (see DetectTags.ino's FW-3 comment), now deferred to
- * session close instead of running immediately on every detection.
+ * removal is still only detected via reselect probes (see DetectTags.ino's
+ * FW-3 comment), now deferred to session close instead of running
+ * immediately on every detection.
+ *
+ * Removal itself is polled, not blocking-waited: the vendor library's
+ * waitForTagRemoval() spins internally (delay(500) + deactivate/reselect)
+ * until the card is gone and never returns control in between, which froze
+ * control.poll() - and therefore the host's handshake - for as long as a
+ * forgotten card sat on the reader (see beginCardRemovalWait()).
  *
  * Distributed as-is; no warranty is given.
  */
@@ -60,6 +66,15 @@ static bool mifareSessionOpen = false;
 static uint32_t mifareSessionDeadline = 0; // millis() deadline
 static const uint32_t MIFARE_SESSION_IDLE_MS = 10000;
 
+// Non-blocking removal wait (replaces a direct waitForTagRemoval() call -
+// see the file header). While true, loop() probes for the card at
+// MIFARE_REMOVAL_PROBE_INTERVAL_MS instead of re-arming discovery, but keeps
+// calling control.poll() every iteration so the host handshake never stalls.
+static bool awaitingRemoval = false;
+static uint32_t nextRemovalProbeAt = 0;
+static const uint32_t MIFARE_REMOVAL_PROBE_INTERVAL_MS = 500; // vendor cadence
+static const uint16_t MIFARE_REMOVAL_PROBE_TIMEOUT_MS = 200;  // bounded reselect wait
+
 // Function prototypes
 String getHexCompact(const byte *data, const uint32_t numBytes);
 const char *getProtocolName(unsigned char protocol);
@@ -70,7 +85,8 @@ void emitMifareEvent(uint32_t tsMs, const String &uidHex, uint8_t blockNum,
 void probeMifareBlock(uint32_t tsMs, const String &uidHex);
 void handleTagDetected();
 void openMifareSession();
-void closeCardSession();
+void beginCardRemovalWait();
+void pollCardRemoval();
 const char *controlState();
 bool bomberCatCommand(const char *verb, char *args);
 void handleMifareCommand(char *args);
@@ -104,10 +120,17 @@ void setup() {
 void loop() {
   control.poll(); // service host CLI commands (ping/info/identify/mifare)
 
+  if (awaitingRemoval) {
+    if ((int32_t)(millis() - nextRemovalProbeAt) >= 0) {
+      pollCardRemoval();
+    }
+    return; // still waiting for the card to leave the field
+  }
+
   if (mifareSessionOpen) {
     if ((int32_t)(millis() - mifareSessionDeadline) >= 0) {
       Serial.println("Mifare session idle timeout.");
-      closeCardSession();
+      beginCardRemovalWait();
     }
     return; // card stays selected; don't re-arm discovery mid-session
   }
@@ -150,7 +173,7 @@ void handleTagDetected() {
     openMifareSession();
     return;
   }
-  closeCardSession();
+  beginCardRemovalWait();
 }
 
 // Arm the interactive REPL session over the currently-selected card.
@@ -161,23 +184,36 @@ void openMifareSession() {
                  "commands (see MIFARE_CLASSIC_PLAN.md Sec.5).");
 }
 
-// End a card session: wait for physical removal and re-arm discovery.
-// Blocking, same known limitation as before (see DetectTags.ino's FW-3
-// comment) - now only reached once per session instead of once per
-// detection.
-void closeCardSession() {
+// Start ending a card session: arm the non-blocking removal poll (see the
+// file header and pollCardRemoval()) instead of calling the vendor library's
+// blocking waitForTagRemoval(), which never returned control to loop() -
+// and therefore never let control.poll() run - for as long as the card sat
+// on the reader.
+void beginCardRemovalWait() {
   Serial.println("Remove the card...");
-  nfc.raw().waitForTagRemoval();
-  Serial.println("Card removed!");
+  awaitingRemoval = true;
+  nextRemovalProbeAt = millis();
+  mifareSessionOpen = false; // no REPL commands while waiting for removal
+}
 
-  Serial.println("Restarting discovery...");
-  // NfcController::reset() unconditionally re-runs connectNCI +
-  // configureSettings + configMode + startDiscovery (unlike the PN7150
-  // library's own reset(), which skips configureSettings() once a protocol
-  // is latched - see DetectTags.ino's FW-3 comment for the full trace).
-  nfc.reset();
+// One bounded removal probe, called from loop() at
+// MIFARE_REMOVAL_PROBE_INTERVAL_MS - never blocks longer than
+// MIFARE_REMOVAL_PROBE_TIMEOUT_MS, so control.poll() keeps running between
+// probes. Reuses the same reset()+waitForTag() reselect mifareReselect()
+// already relies on (NfcController::reset() unconditionally re-runs
+// connectNCI + configureSettings + configMode + startDiscovery, unlike the
+// PN7150 library's own reset() - see DetectTags.ino's FW-3 comment for the
+// full trace). If the reselect still finds a card, it's the same one still
+// sitting there - keep waiting. Once it doesn't, the card is gone and
+// discovery is already freshly re-armed from that last reset().
+void pollCardRemoval() {
+  nextRemovalProbeAt = millis() + MIFARE_REMOVAL_PROBE_INTERVAL_MS;
+  if (nfc.reset() && nfc.waitForTag(MIFARE_REMOVAL_PROBE_TIMEOUT_MS)) {
+    return; // still present - try again next interval
+  }
+  Serial.println("Card removed!");
   Serial.println("Waiting for a Mifare Classic card...");
-  mifareSessionOpen = false;
+  awaitingRemoval = false;
   tagSessionActive = false;
 }
 
