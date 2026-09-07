@@ -36,6 +36,30 @@ bool mifareAuthenticate(NfcController &nfc, uint8_t blockNum, uint8_t keyType,
   return respLen > 0 && resp[respLen - 1] == MIFARE_STATUS_OK;
 }
 
+bool mifareReselect(NfcController &nfc, uint16_t timeoutMs) {
+  // A wrong Crypto-1 key HALTs the card and deselects it; every following
+  // command (including the *correct* next key in a dictionary sweep) then
+  // fails until the card goes through a fresh anticollision + SELECT. Re-arm
+  // reader discovery and re-select the card that is still on the reader.
+  //
+  // HARDWARE NOTE (CLI_IMPROVEMENTS_MifareCheck.md §4 gate F0): this uses the
+  // FULL reader re-arm via NfcController::reset() (connectNCI re-pulses VEN +
+  // configureSettings + configMode + startDiscovery) — the only reader
+  // re-selection proven on this hardware, the same path the sketch's
+  // closeCardSession() already relies on. A lighter stopDiscovery +
+  // startDiscovery re-arm was tried and found insufficient here (see
+  // NfcController::cardReArm()'s comment for the "worked exactly once" trace),
+  // so it is deliberately not used. It costs a chip re-init (~tens of ms) per
+  // failed key; acceptable for the default-key case, where the hit is near the
+  // top of the dictionary. If F0 hardware testing shows a cheaper
+  // deactivate-to-discovery suffices for poll mode, swap it in here without
+  // touching callers.
+  if (!nfc.reset()) {
+    return false;
+  }
+  return nfc.waitForTag(timeoutMs);
+}
+
 bool mifareReadBlock(NfcController &nfc, uint8_t blockNum, uint8_t *buffer,
                      uint8_t *bufferLen) {
   uint8_t cmd[3] = {MIFARE_CMD_TAG_RELAY, MIFARE_CMD_READ, blockNum};

@@ -268,6 +268,13 @@ void probeMifareBlock(uint32_t tsMs, const String &uidHex) {
       emitMifareEvent(tsMs, uidHex, MIFARE_PROBE_BLOCK, data, dataLen, "ok");
       return;
     }
+    // A failed attempt HALTed the card; re-select before the next key, else
+    // only MIFARE_PROBE_KEYS[0] is ever really tested (same HALT gotcha the
+    // `mifare check` sweep hits). Skip after the last key — we're about to
+    // report auth_fail regardless.
+    if (i + 1 < MIFARE_PROBE_KEY_COUNT && !mifareReselect(nfc)) {
+      break; // card left the field mid-probe; nothing more to try
+    }
   }
   emitMifareEvent(tsMs, uidHex, MIFARE_PROBE_BLOCK, nullptr, 0, "auth_fail");
 }
@@ -384,6 +391,12 @@ void handleMifareAuth(char *args) {
   if (mifareAuthenticate(nfc, blockNum, keyType, key)) {
     replyOk();
   } else {
+    // A wrong key HALTs the card. Re-select it before answering so the host's
+    // NEXT dictionary attempt starts clean — without this, one wrong key (e.g.
+    // FFFFFFFFFFFF on a sector keyed A0A1A2A3A4A5) dooms the whole sweep and
+    // `mifare check` reports every key as failing. The interactive session
+    // stays open either way. See CLI_IMPROVEMENTS_MifareCheck.md §4.
+    mifareReselect(nfc);
     replyErr("authentication failed");
   }
 }

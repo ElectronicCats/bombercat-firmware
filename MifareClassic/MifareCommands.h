@@ -19,8 +19,23 @@
 // Authenticate `blockNum`'s sector with `key` (6 bytes) as Key A/B
 // (MIFARE_KEY_A / MIFARE_KEY_B from MifareClassic.h). Must be called before
 // mifareReadBlock/mifareWriteBlock on any block in that sector.
+//
+// A FAILED authentication (wrong key) leaves the MIFARE card HALTed and
+// deselected, so the very next command also fails until the card is
+// re-selected. Callers that try more than one key in a row (the auto-probe,
+// and the host-driven `mifare check` dictionary sweep) MUST call
+// mifareReselect() after a failure before the next attempt, or only the first
+// key is ever really tested. See mifareReselect() and
+// CLI_IMPROVEMENTS_MifareCheck.md §4.
 bool mifareAuthenticate(NfcController &nfc, uint8_t blockNum, uint8_t keyType,
                         const uint8_t *key);
+
+// Recover the reader link after a FAILED mifareAuthenticate(): re-select the
+// still-present (but HALTed) card so the next attempt starts from a clean,
+// selected state. Returns true if a card was re-selected within `timeoutMs`,
+// false if none is in the field any more. See the .cpp for the hardware note
+// on why this uses the full reader re-arm.
+bool mifareReselect(NfcController &nfc, uint16_t timeoutMs = 500);
 
 // Read one 16-byte block into `buffer` (`bufferLen` set to the bytes
 // written). Requires a prior successful mifareAuthenticate() on the same
