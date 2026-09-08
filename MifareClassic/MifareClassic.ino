@@ -532,14 +532,24 @@ void handleMifareSector(char *args) {
 
   uint8_t sectorNum = (uint8_t)atoi(sectorTok);
   uint8_t sectorData[MIFARE_BLOCKS_PER_SECTOR * MIFARE_BLOCK_SIZE];
+  bool authOk = false;
   mifareBeginAuth(); // independent auth: never ride a prior success's session
-  if (!mifareReadSector(nfc, sectorNum, keyType, key, sectorData)) {
+  if (!mifareReadSector(nfc, sectorNum, keyType, key, sectorData, &authOk)) {
     // A failed auth inside mifareReadSector HALTed the card; re-select so the
     // next self-contained command starts clean (same gotcha handleMifareAuth
     // guards against).
     mifareReselect(nfc);
     mifareCardAuthed = false;
-    replyErr("sector read failed");
+    if (authOk) {
+      // Key was right (auth succeeded) but a block read NAKed — the
+      // sector's access bits don't permit reading with this key type, not
+      // a wrong-key problem. Distinguish it from "authentication failed" so
+      // callers (and users) don't waste time re-checking the key.
+      replyErr("sector read failed: key authenticated but a block read was "
+               "denied (access bits)");
+    } else {
+      replyErr("authentication failed");
+    }
     return;
   }
   mifareCardAuthed = true; // sector auth left an open session; tear down next

@@ -115,10 +115,16 @@ bool mifareWriteBlock(NfcController &nfc, uint8_t blockNum, const uint8_t *data,
 }
 
 bool mifareReadSector(NfcController &nfc, uint8_t sectorNum, uint8_t keyType,
-                      const uint8_t *key, uint8_t *outData) {
+                      const uint8_t *key, uint8_t *outData, bool *authOk) {
   const uint8_t firstBlock = sectorNum * MIFARE_BLOCKS_PER_SECTOR;
   if (!mifareAuthenticate(nfc, firstBlock, keyType, key)) {
+    if (authOk) {
+      *authOk = false;
+    }
     return false;
+  }
+  if (authOk) {
+    *authOk = true;
   }
   for (uint8_t i = 0; i < MIFARE_BLOCKS_PER_SECTOR; i++) {
     uint8_t blockLen = 0;

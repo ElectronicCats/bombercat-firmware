@@ -52,7 +52,15 @@ bool mifareWriteBlock(NfcController &nfc, uint8_t blockNum, const uint8_t *data,
 // Authenticate and read all MIFARE_BLOCKS_PER_SECTOR (4) blocks of
 // `sectorNum` into `outData` (caller-provided buffer of at least
 // MIFARE_BLOCKS_PER_SECTOR * MIFARE_BLOCK_SIZE = 64 bytes).
+//
+// If `authOk` is non-null, it is always set before returning: true once
+// mifareAuthenticate() succeeds, even if a later block read then fails. That
+// lets the caller tell "wrong key" (authOk left false) apart from "key was
+// fine, but a block read was denied" (authOk true, return false) — the
+// latter means the sector's access bits don't allow reading with this key
+// type, not that the key itself is wrong.
 bool mifareReadSector(NfcController &nfc, uint8_t sectorNum, uint8_t keyType,
-                      const uint8_t *key, uint8_t *outData);
+                      const uint8_t *key, uint8_t *outData,
+                      bool *authOk = nullptr);
 
 #endif // MIFARECOMMANDS_H
