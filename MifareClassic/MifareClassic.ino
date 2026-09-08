@@ -66,6 +66,19 @@ static bool mifareSessionOpen = false;
 static uint32_t mifareSessionDeadline = 0; // millis() deadline
 static const uint32_t MIFARE_SESSION_IDLE_MS = 10000;
 
+// True while the selected card holds an open Crypto1 session from a prior
+// SUCCESSFUL authentication (auto-probe, `mifare auth`, or `mifare sector`).
+// A successful auth is deliberately NOT followed by a re-select so `mifare
+// auth` + a later `mifare read`/`write` can share the session across separate
+// host commands. But that warm session must be torn down before the NEXT
+// authentication, or the PN7150 lets a fresh auth to the same sector ride it:
+// e.g. after Key A = A0A1A2A3A4A5 opens a sector, `mifare auth <blk> B
+// A0A1A2A3A4A5` succeeds against the still-open Key A session even though the
+// real Key B differs, so `mifare check`'s known-keys-first sweep reports
+// Key B == Key A. mifareBeginAuth() re-selects when this flag is set so every
+// authentication starts from a clean, independent SELECT.
+static bool mifareCardAuthed = false;
+
 // Non-blocking removal wait (replaces a direct waitForTagRemoval() call -
 // see the file header). While true, loop() probes for the card at
 // MIFARE_REMOVAL_PROBE_INTERVAL_MS instead of re-arming discovery, but keeps
@@ -91,6 +104,7 @@ void pollCardRemoval();
 const char *controlState();
 bool bomberCatCommand(const char *verb, char *args);
 void handleMifareCommand(char *args);
+void mifareBeginAuth();
 void handleMifareAuth(char *args);
 void handleMifareRead(char *args);
 void handleMifareWrite(char *args);
@@ -216,6 +230,7 @@ void pollCardRemoval() {
   Serial.println("Waiting for a Mifare Classic card...");
   awaitingRemoval = false;
   tagSessionActive = false;
+  mifareCardAuthed = false; // next card starts from a clean, un-authed session
 }
 
 // Compact uppercase hex with no "0x"/separators, e.g. "041A2B3C" - the
@@ -302,6 +317,10 @@ void probeMifareBlock(uint32_t tsMs, const String &uidHex) {
     if (mifareAuthenticate(nfc, MIFARE_PROBE_BLOCK, MIFARE_KEY_A,
                            MIFARE_PROBE_KEYS[i]) &&
         mifareReadBlock(nfc, MIFARE_PROBE_BLOCK, data, &dataLen)) {
+      // The card is left authenticated (no re-select on success) - remember it
+      // so the session's first `mifare auth` re-selects first (see
+      // mifareCardAuthed) instead of riding this probe's session.
+      mifareCardAuthed = true;
       emitMifareEvent(tsMs, uidHex, MIFARE_PROBE_BLOCK, data, dataLen, "ok");
       return;
     }
@@ -416,6 +435,19 @@ static void replyKv(const char *key, const String &value) {
   Serial.println(value);
 }
 
+// Force the next authentication to run from a clean SELECT. If the card still
+// holds an open Crypto1 session from a prior successful auth, re-select it so
+// this authentication is evaluated independently instead of riding the warm
+// session (the Key B == Key A duplication described at mifareCardAuthed). A
+// no-op when nothing is authenticated, so it costs a re-select only right
+// after a success, not on every probed key.
+void mifareBeginAuth() {
+  if (mifareCardAuthed) {
+    mifareReselect(nfc);
+    mifareCardAuthed = false;
+  }
+}
+
 // `mifare auth <block> <A|B> <key_hex12>` -> +OK / -ERR
 void handleMifareAuth(char *args) {
   char *blockTok = nextArg(&args);
@@ -430,9 +462,12 @@ void handleMifareAuth(char *args) {
   }
 
   uint8_t blockNum = (uint8_t)atoi(blockTok);
+  mifareBeginAuth(); // independent auth: never ride a prior success's session
   if (mifareAuthenticate(nfc, blockNum, keyType, key)) {
+    mifareCardAuthed = true; // session now open; tear down before the next auth
     replyOk();
   } else {
+    mifareCardAuthed = false; // the failure path re-selects below (clean card)
     // A wrong key HALTs the card. Re-select it before answering so the host's
     // NEXT dictionary attempt starts clean — without this, one wrong key (e.g.
     // FFFFFFFFFFFF on a sector keyed A0A1A2A3A4A5) dooms the whole sweep and
@@ -497,10 +532,17 @@ void handleMifareSector(char *args) {
 
   uint8_t sectorNum = (uint8_t)atoi(sectorTok);
   uint8_t sectorData[MIFARE_BLOCKS_PER_SECTOR * MIFARE_BLOCK_SIZE];
+  mifareBeginAuth(); // independent auth: never ride a prior success's session
   if (!mifareReadSector(nfc, sectorNum, keyType, key, sectorData)) {
+    // A failed auth inside mifareReadSector HALTed the card; re-select so the
+    // next self-contained command starts clean (same gotcha handleMifareAuth
+    // guards against).
+    mifareReselect(nfc);
+    mifareCardAuthed = false;
     replyErr("sector read failed");
     return;
   }
+  mifareCardAuthed = true; // sector auth left an open session; tear down next
   replyKv("mifare_sector", getHexCompact(sectorData, sizeof(sectorData)));
   replyOk();
 }
