@@ -8,7 +8,7 @@
 
 #include <Arduino.h>
 
-#define BOMBERCAT_FW_VERSION "1.2.0.0"
+#define BOMBERCAT_FW_VERSION "1.1.0.0"
 #define BOMBERCAT_FW_NAME "mifareclassic"
 
 // Mifare Classic key types, as used by the PN7150's raw reader-mode
