@@ -13,6 +13,7 @@ bombercat-firmware/
 ├── core/                   # BomberCatCore — shared Arduino library (NFCGate relay stack)
 ├── NFCGate/                # ★ Main relay firmware (NFCGate-compatible, both READER + CARD roles)
 ├── DetectTags/               # NFC tag reader / UID dumper
+├── MifareClassic/            # Mifare Classic reader — auth/read/write blocks over the control REPL
 ├── DetectReaders/            # NFC reader detector / fingerprinter (security sensor)
 ├── magspoof/               # Magnetic-stripe emulator (single card, button-triggered)
 ├── MagspoofCVSAttack/      # MagSpoof variant that replays a CSV track dataset
@@ -53,6 +54,21 @@ See [`NFCGate/README.md`](NFCGate/README.md) for build, configuration, and usage
 Lightweight NFC diagnostic firmware. Polls the PN7150 RF field continuously and prints the
 technology and UID of any detected tag (ISO 14443-A/B, ISO 15693, FeliCa, …) over USB serial.
 No relay or emulation logic.
+
+### MifareClassic
+
+Mifare Classic reader firmware for the onboard PN7150. It polls the RF field and, on
+detection, reports the card's UID (same `:tag` wire format as DetectTags) and auto-probes a
+block with the built-in default keys, emitting the outcome as a structured `:mifare` serial
+event. The card then stays selected in an interactive session so the host CLI can drive it
+over the control REPL — `mifare auth`, `read`, `write`, `sector` and `keys` — to authenticate
+a sector (key A/B) and read or write its blocks; the host builds `check`, `dump` and `restore`
+on top of these primitives. A failed authentication halts the card, so the firmware re-selects
+it automatically before the next attempt, letting a dictionary/key sweep run without physical
+re-taps. The session closes after a short idle timeout or when the card is removed, and the
+standard `ping`/`info`/`identify` control REPL is answered throughout.
+
+Reading or writing another party's cards is **for authorized security testing only**.
 
 ### DetectReaders
 

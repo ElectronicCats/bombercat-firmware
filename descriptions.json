@@ -5,6 +5,10 @@
             "description": "NFC tag reader for the BomberCat's onboard PN7150. It continuously polls the RF field and, whenever a contactless tag (ISO14443-A/B, ISO15693, Felica, etc.) enters range, it detects the technology, reads the tag's unique identifier (UID) and prints it over USB serial. It is a lightweight diagnostic/learning firmware to confirm the NFC front-end works and to capture the UID of physical cards, with no relay or emulation logic."
         },
         {
+            "filename": "MifareClassic.uf2",
+            "description": "Mifare Classic card reader for the BomberCat's onboard PN7150. It polls for a card and, on detection, reports its UID (same ':tag' wire format as DetectTags) and auto-probes a block with the built-in default keys, reporting the outcome as a ':mifare' event. The card then stays selected in an interactive session so the host CLI can issue 'mifare auth/read/write/sector/keys' commands over the control REPL to authenticate a sector and read or write its blocks, closing after a short idle timeout or on physical removal."
+        },
+        {
             "filename": "DetectReaders.uf2",
             "description": "NFC reader detector for the BomberCat's onboard PN7150, a defensive security-sensor counterpart to DetectTags. The chip runs in card-emulation (listen) mode presenting an emulated contactless card; whenever an external reader or terminal (a payment terminal, a phone wallet, a P2P initiator) enters the field and activates it, the firmware reports the reader's polling technology, protocol and interface over USB serial, exchanges APDUs during a short dwell window and fingerprints the first command: a PPSE SELECT identifies an EMV payment terminal, well-known AIDs identify payment apps (Visa/Mastercard/Amex) or NDEF readers. Each detection is emitted both as human-readable text and as one structured ':reader' serial event with the same wire conventions as DetectTags' ':tag' events, ready for bombercat-tools to parse. It answers the standard ping/info/identify control REPL and re-arms automatically after every session, so repeated readers are all detected."
         },
