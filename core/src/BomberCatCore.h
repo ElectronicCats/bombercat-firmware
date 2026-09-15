@@ -15,6 +15,10 @@
  *                     READER- and CARD-role relay loops)
  *   - SerialControl : line-based control REPL for the Python CLI (config/run/
  *                     status over USB-serial; no APDUs on the wire)
+ *   - MagStripe   : MagSpoof F2F magnetic-stripe emulation engine (classic /
+ *                   forward-only waveforms), shared by the MagSpoof sketches
+ *   - TagReader   : PN7150 tag helpers (hexCompact / protocolName /
+ *                   emitTagEvent) shared by the tag/reader sketches
  *
  * Distributed as-is; no warranty is given.
  */
@@ -24,10 +28,12 @@
 #include "ConfigStore.h"
 #include "HexUtils.h"
 #include "Log.h"
+#include "MagStripe.h"
 #include "NfcController.h"
 #include "NfcGateLink.h"
 #include "RelayEngine.h"
 #include "SerialControl.h"
+#include "TagReader.h"
 
 // NfcGateLink.h pulls in NfcGateCodec.h, which exposes the vendored NFCGate
 // protobuf types (NFCData / ServerData) generated in Fase 1 along with short
