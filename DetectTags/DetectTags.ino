@@ -17,6 +17,7 @@
 #include "Electroniccats_PN7150.h"
 #include <BomberCatControl.h>
 #include <HexUtils.h>
+#include <TagReader.h>
 
 #define BOMBERCAT_FW_VERSION "1.2.0.0"
 
@@ -34,11 +35,9 @@ Electroniccats_PN7150
 // discover and identify this board over USB serial.
 BomberCatControl control(Serial, BOMBERCAT_FW_VERSION, "detecttags");
 
-// Function prototypes
-String getHexCompact(const byte *data, const uint32_t numBytes);
-const char *getProtocolName(unsigned char protocol);
-void emitTagEvent(uint32_t tsMs, const char *tech, const char *protocol,
-                  const String &uidHex, const String &extra = "");
+// Function prototypes. The hex/protocol/event helpers now live in
+// BomberCatCore's TagReader (they were byte-identical across DetectTags,
+// DetectReaders and MifareClassic).
 void displayCardInfo();
 
 void setup() {
@@ -116,69 +115,12 @@ void loop() {
   }
 }
 
-// Compact uppercase hex with no "0x"/separators, e.g. "041A2B3C" - the
-// :tag wire format's uid_hex field (see modules/tags/parser.py
-// TagParser._hex_compact in bombercat-tools). "-" means no UID available.
-String getHexCompact(const byte *data, const uint32_t numBytes) {
-  if (numBytes == 0) {
-    return "-";
-  }
-  char tmp[3];
-  String hex;
-  for (uint32_t i = 0; i < numBytes; i++) {
-    sprintf(tmp, "%02X", data[i] & 0xFF);
-    hex += tmp;
-  }
-  return hex;
-}
-
-const char *getProtocolName(unsigned char protocol) {
-  switch (protocol) {
-  case nfc.protocol.T1T:
-    return "T1T";
-  case nfc.protocol.T2T:
-    return "T2T";
-  case nfc.protocol.T3T:
-    return "T3T";
-  case nfc.protocol.ISODEP:
-    return "ISODEP";
-  case nfc.protocol.NFCDEP:
-    return "NFCDEP";
-  case nfc.protocol.ISO15693:
-    return "ISO15693";
-  case nfc.protocol.MIFARE:
-    return "MIFARE";
-  default:
-    return "UNKNOWN";
-  }
-}
-
-// Structured event consumed by bombercat-tools' TagParser: once it sees one
-// ":tag" line it stops parsing the legacy prose below permanently, so this
-// is emitted alongside (not instead of) the existing Serial prints. `extra`
-// is optional trailing "k=v" pairs (space-separated), e.g. "attrib=1122".
-void emitTagEvent(uint32_t tsMs, const char *tech, const char *protocol,
-                  const String &uidHex, const String &extra) {
-  Serial.print(":tag ");
-  Serial.print(tsMs);
-  Serial.print(' ');
-  Serial.print(tech);
-  Serial.print(' ');
-  Serial.print(protocol);
-  Serial.print(' ');
-  Serial.print(uidHex);
-  if (extra.length() > 0) {
-    Serial.print(' ');
-    Serial.print(extra);
-  }
-  Serial.println();
-}
-
 void displayCardInfo() { // Funtion in charge to show the card/s in te field
   char tmp[16];
 
   while (true) {
-    const char *protocolName = getProtocolName(nfc.remoteDevice.getProtocol());
+    const char *protocolName =
+        TagReader::protocolName(nfc.remoteDevice.getProtocol());
 
     switch (nfc.remoteDevice.getProtocol()) { // Indetify card protocol
     case nfc.protocol.T1T:
@@ -214,9 +156,10 @@ void displayCardInfo() { // Funtion in charge to show the card/s in te field
       Serial.println(HexUtils::toString(nfc.remoteDevice.getSelRes(),
                                         nfc.remoteDevice.getSelResLen()));
 
-      emitTagEvent(millis(), "NFC-A", protocolName,
-                   getHexCompact(nfc.remoteDevice.getNFCID(),
-                                 nfc.remoteDevice.getNFCIDLen()));
+      TagReader::emitTagEvent(
+          Serial, millis(), "NFC-A", protocolName,
+          TagReader::hexCompact(nfc.remoteDevice.getNFCID(),
+                                nfc.remoteDevice.getNFCIDLen()));
       break;
 
     case (nfc.tech.PASSIVE_NFCB): {
@@ -239,11 +182,12 @@ void displayCardInfo() { // Funtion in charge to show the card/s in te field
       if (sensResLen >= 5) {
         Serial.print("\tPUPI = ");
         Serial.println(HexUtils::toString(&sensRes[1], 4));
-        pupiHex = getHexCompact(&sensRes[1], 4);
+        pupiHex = TagReader::hexCompact(&sensRes[1], 4);
       }
 
-      String extra = "attrib=" + getHexCompact(attribRes, attribResLen);
-      emitTagEvent(millis(), "NFC-B", protocolName, pupiHex, extra);
+      String extra = "attrib=" + TagReader::hexCompact(attribRes, attribResLen);
+      TagReader::emitTagEvent(Serial, millis(), "NFC-B", protocolName, pupiHex,
+                              extra);
       break;
     }
 
@@ -264,11 +208,12 @@ void displayCardInfo() { // Funtion in charge to show the card/s in te field
       if (sensResLen >= 9) {
         Serial.print("\tIDm = ");
         Serial.println(HexUtils::toString(&sensRes[1], 8));
-        idmHex = getHexCompact(&sensRes[1], 8);
+        idmHex = TagReader::hexCompact(&sensRes[1], 8);
       }
 
       String extra = is212 ? "bitrate=212" : "bitrate=424";
-      emitTagEvent(millis(), "NFC-F", protocolName, idmHex, extra);
+      TagReader::emitTagEvent(Serial, millis(), "NFC-F", protocolName, idmHex,
+                              extra);
       break;
     }
 
@@ -286,8 +231,9 @@ void displayCardInfo() { // Funtion in charge to show the card/s in te field
 
       // ID is a fixed 8-byte field (RemoteDevice.h); getID() has no length
       // getter, unlike the other technologies.
-      emitTagEvent(millis(), "NFC-V", protocolName,
-                   getHexCompact(nfc.remoteDevice.getID(), 8));
+      TagReader::emitTagEvent(
+          Serial, millis(), "NFC-V", protocolName,
+          TagReader::hexCompact(nfc.remoteDevice.getID(), 8));
       break;
 
     default:
