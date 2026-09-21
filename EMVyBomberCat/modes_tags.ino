@@ -24,10 +24,13 @@ void emvyTagsRead() {
   Serial.print(" TECH:");
   Serial.print(nfc.remoteDevice.getModeTech());
   Serial.print(" UID:");
-  for (unsigned int i = 0; i < n; i++) {
-    if (uid[i] < 0x10)
-      Serial.print('0');
-    Serial.print(uid[i], HEX); // Arduino imprime HEX en mayúsculas
+  // Formato TAG:/TECH:/UID: mantenido por retrocompatibilidad con emvyctl
+  // (ver PLAN_IMPLEMENTACION_EMVYBOMBERCAT.md, Fase 4 #6); el hex ahora se
+  // deriva de core/src/TagReader en vez de un loop propio. hexCompact()
+  // devuelve "-" para n==0, que aquí se omite para no cambiar el wire format
+  // (antes imprimía nada tras "UID:" si no había UID).
+  if (n > 0) {
+    Serial.print(TagReader::hexCompact(uid, n));
   }
   Serial.println();
 

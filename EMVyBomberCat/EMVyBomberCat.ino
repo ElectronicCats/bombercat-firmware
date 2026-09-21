@@ -44,6 +44,9 @@
 #include <ArduinoJson.h>
 #include <BomberCatControl.h>
 #include <Electroniccats_PN7150.h>
+#include <HexUtils.h>
+#include <MagStripe.h>
+#include <TagReader.h>
 #include <WiFiNINA.h>
 #include <Wire.h>
 #include <stdarg.h>
@@ -276,45 +279,8 @@ static uint32_t hwRand32() {
 // ---------------------------------------------------------------------------
 // Helpers EMV
 // ---------------------------------------------------------------------------
-static void hexEncode(const uint8_t *data, int len, char *out) {
-  static const char H[] = "0123456789ABCDEF";
-  for (int i = 0; i < len; i++) {
-    out[i * 2] = H[(data[i] >> 4) & 0x0F];
-    out[i * 2 + 1] = H[data[i] & 0x0F];
-  }
-  out[len * 2] = '\0';
-}
-
-// Decodifica una cadena hex (mayus/minus, ignora espacios) a bytes. Devuelve nº
-// bytes.
-static int _hexNib(char c) {
-  if (c >= '0' && c <= '9')
-    return c - '0';
-  if (c >= 'A' && c <= 'F')
-    return c - 'A' + 10;
-  if (c >= 'a' && c <= 'f')
-    return c - 'a' + 10;
-  return -1;
-}
-static int hexDecode(const char *s, uint8_t *out, int maxLen) {
-  int n = 0;
-  while (s[0]) {
-    if (s[0] == ' ') {
-      s++;
-      continue;
-    }
-    if (!s[1])
-      break;
-    int hi = _hexNib(s[0]), lo = _hexNib(s[1]);
-    if (hi < 0 || lo < 0)
-      break;
-    if (n >= maxLen)
-      break;
-    out[n++] = (uint8_t)((hi << 4) | lo);
-    s += 2;
-  }
-  return n;
-}
+// Hex encode/decode ahora viven en core/src/HexUtils (HexUtils::toCompact /
+// HexUtils::decode) — antes reimplementados aquí como hexEncode()/hexDecode().
 
 static void encodeAmount(uint64_t cents, uint8_t *out6) {
   for (int i = 5; i >= 0; i--) {
@@ -715,14 +681,14 @@ static bool runEmvFlowOnce(uint64_t amountCents) {
   uint8_t fciLen = 0;
   bool aidOk = false;
   if (ppseAidLen > 0 && selectAID(ppseAid, ppseAidLen, fci, fciLen)) {
-    hexEncode(ppseAid, ppseAidLen, card.aidHex);
+    HexUtils::toCompact(ppseAid, ppseAidLen, card.aidHex);
     strncpy(card.aidName, "DISC", sizeof(card.aidName) - 1);
     aidOk = true;
   }
   for (int a = 0; a < NUM_AIDS && !aidOk; a++) {
     if (selectAID(AIDS[a].bytes, AIDS[a].len, fci, fciLen)) {
       strncpy(card.aidName, AIDS[a].name, sizeof(card.aidName) - 1);
-      hexEncode(AIDS[a].bytes, AIDS[a].len, card.aidHex);
+      HexUtils::toCompact(AIDS[a].bytes, AIDS[a].len, card.aidHex);
       aidOk = true;
     }
   }
@@ -753,7 +719,7 @@ static bool runEmvFlowOnce(uint64_t amountCents) {
     int t57l = 0;
     uint8_t *t57 = tlvFind(gd, gdl, 0x57, &t57l);
     if (t57 && t57l > 0) {
-      hexEncode(t57, t57l, card.track2);
+      HexUtils::toCompact(t57, t57l, card.track2);
       char *sep = strchr(card.track2, 'D');
       if (sep) {
         int pl = sep - card.track2;
@@ -770,7 +736,7 @@ static bool runEmvFlowOnce(uint64_t amountCents) {
       int ppl = 0;
       uint8_t *pp = tlvFind(gd, gdl, 0x5A, &ppl);
       if (pp) {
-        hexEncode(pp, ppl, card.pan);
+        HexUtils::toCompact(pp, ppl, card.pan);
         int l = strlen(card.pan);
         while (l > 0 && card.pan[l - 1] == 'F')
           card.pan[--l] = '\0';
@@ -782,7 +748,7 @@ static bool runEmvFlowOnce(uint64_t amountCents) {
       uint8_t *ep = tlvFind(gd, gdl, 0x5F24, &el);
       if (ep && el >= 3) {
         char t[8];
-        hexEncode(ep, 3, t);
+        HexUtils::toCompact(ep, 3, t);
         strncpy(card.expiry, t, 4);
         card.expiry[4] = '\0';
       }
@@ -923,21 +889,21 @@ static void buildWebJson(uint64_t amountCents) {
   doc["track2"] = card.track2;
   doc["aid"] = card.aidHex;
   doc["aidName"] = card.aidName;
-  hexEncode(card.arqc, 8, buf);
+  HexUtils::toCompact(card.arqc, 8, buf);
   doc["arqc"] = buf;
-  hexEncode(card.atc, 2, buf);
+  HexUtils::toCompact(card.atc, 2, buf);
   doc["atc"] = buf;
-  hexEncode(card.aip, 2, buf);
+  HexUtils::toCompact(card.aip, 2, buf);
   doc["aip"] = buf;
-  hexEncode(card.un, 4, buf);
+  HexUtils::toCompact(card.un, 4, buf);
   doc["un"] = buf;
-  hexEncode(card.iad, card.iadLen, buf);
+  HexUtils::toCompact(card.iad, card.iadLen, buf);
   doc["iad"] = buf;
-  hexEncode(card.cdol1, card.cdol1Len, buf);
+  HexUtils::toCompact(card.cdol1, card.cdol1Len, buf);
   doc["cdol1"] = buf;
-  hexEncode(TERM_TTQ, 4, buf);
+  HexUtils::toCompact(TERM_TTQ, 4, buf);
   doc["ttq"] = buf;
-  hexEncode(CVM_RESULTS, 3, buf);
+  HexUtils::toCompact(CVM_RESULTS, 3, buf);
   doc["cvmResults"] = buf;
   doc["amount_cents"] = (uint32_t)amountCents;
   doc["txn_date"] =
@@ -1505,6 +1471,19 @@ static void streamBody(WiFiClient &client, const char *buf, size_t len) {
   }
 }
 
+// Nibble hex único para el %XX de qparam() — no confundir con
+// HexUtils::decode (cadena completa), que resuelve un problema distinto
+// (payloads EMV) y vive en core/ desde la Fase 4.
+static int _hexNib(char c) {
+  if (c >= '0' && c <= '9')
+    return c - '0';
+  if (c >= 'A' && c <= 'F')
+    return c - 'A' + 10;
+  if (c >= 'a' && c <= 'f')
+    return c - 'a' + 10;
+  return -1;
+}
+
 // Extrae y decodifica (%XX, +) un parámetro de query de la línea de request.
 static String qparam(const String &req, const char *key) {
   String pat = String(key) + "=";
@@ -1678,7 +1657,7 @@ static void handleTest(WiFiClient &client, const String &id) {
           uint8_t al = resp[i + 1];
           if (i + 2 + al <= (int)rLen) {
             char h[34];
-            hexEncode(resp + i + 2, al, h);
+            HexUtils::toCompact(resp + i + 2, al, h);
             if (strlen(aidStr) + strlen(h) + 4 < sizeof(aidStr)) {
               if (aidCount > 0)
                 strcat(aidStr, " | ");
@@ -1766,7 +1745,7 @@ static void handleTest(WiFiClient &client, const String &id) {
     for (int a = 0; a < NUM_AIDS && !aidOk; a++) {
       if (selectAID(AIDS[a].bytes, AIDS[a].len, fci, fciLen)) {
         strncpy(card.aidName, AIDS[a].name, sizeof(card.aidName) - 1);
-        hexEncode(AIDS[a].bytes, AIDS[a].len, card.aidHex);
+        HexUtils::toCompact(AIDS[a].bytes, AIDS[a].len, card.aidHex);
         aidOk = true;
         SLOGF("AID: %s", AIDS[a].name);
       }
@@ -1783,7 +1762,7 @@ static void handleTest(WiFiClient &client, const String &id) {
       int l = 0;
       uint8_t *p57 = tlvFind(buf, blen, 0x57, &l);
       if (p57 && l > 0) {
-        hexEncode(p57, l, card.track2);
+        HexUtils::toCompact(p57, l, card.track2);
         char *sep = strchr(card.track2, 'D');
         if (sep) {
           int pl = sep - card.track2;
@@ -1797,7 +1776,7 @@ static void handleTest(WiFiClient &client, const String &id) {
         int l2 = 0;
         uint8_t *p5A = tlvFind(buf, blen, 0x5A, &l2);
         if (p5A && l2 > 0) {
-          hexEncode(p5A, l2, card.pan);
+          HexUtils::toCompact(p5A, l2, card.pan);
           int n = strlen(card.pan);
           while (n > 0 && card.pan[n - 1] == 'F')
             card.pan[--n] = '\0';
@@ -1808,7 +1787,7 @@ static void handleTest(WiFiClient &client, const String &id) {
         uint8_t *ep = tlvFind(buf, blen, 0x5F24, &el);
         if (ep && el >= 3) {
           char tmp[8];
-          hexEncode(ep, 3, tmp);
+          HexUtils::toCompact(ep, 3, tmp);
           strncpy(card.expiry, tmp, 4);
           card.expiry[4] = '\0';
         }
@@ -1909,7 +1888,7 @@ static void handleTest(WiFiClient &client, const String &id) {
       uint8_t *ap = tlvFind(resp, rLen - 2, 0x4F, &al);
       if (ap) {
         char h[34];
-        hexEncode(ap, al, h);
+        HexUtils::toCompact(ap, al, h);
         snprintf(detail, sizeof(detail), "AID en PPSE: %s", h);
         SLOGF("AID: %s", h);
       } else
@@ -1935,7 +1914,7 @@ static void handleTest(WiFiClient &client, const String &id) {
     for (int a = 0; a < NUM_AIDS && !aidOk; a++) {
       if (selectAID(AIDS[a].bytes, AIDS[a].len, fci, fciLen)) {
         char h[34];
-        hexEncode(AIDS[a].bytes, AIDS[a].len, h);
+        HexUtils::toCompact(AIDS[a].bytes, AIDS[a].len, h);
         snprintf(detail, sizeof(detail), "%s seleccionada (%s)", AIDS[a].name,
                  h);
         SLOGF("AID: %s = %s", AIDS[a].name, h);
@@ -1992,7 +1971,7 @@ static void handleTest(WiFiClient &client, const String &id) {
       }
       char aipH[6] = "";
       if (aipP)
-        hexEncode(aipP, 2, aipH);
+        HexUtils::toCompact(aipP, 2, aipH);
       int recCount = 0;
       if (aflP && aflL >= 4)
         for (int i = 0; i + 3 < aflL; i += 4)
@@ -2072,10 +2051,10 @@ static void handleTest(WiFiClient &client, const String &id) {
     pass = runEmvFlow(500);
     if (pass) {
       char arqcH[18], atcH[6], aipH[6], iadH[66];
-      hexEncode(card.arqc, 8, arqcH);
-      hexEncode(card.atc, 2, atcH);
-      hexEncode(card.aip, 2, aipH);
-      hexEncode(card.iad, card.iadLen, iadH);
+      HexUtils::toCompact(card.arqc, 8, arqcH);
+      HexUtils::toCompact(card.atc, 2, atcH);
+      HexUtils::toCompact(card.aip, 2, aipH);
+      HexUtils::toCompact(card.iad, card.iadLen, iadH);
       snprintf(detail, sizeof(detail), "ARQC: %s | ATC: %s | %s", arqcH, atcH,
                card.aidName);
       SLOGF("ARQC: %s", arqcH);
@@ -2106,7 +2085,7 @@ static void handleTest(WiFiClient &client, const String &id) {
     pass = runEmvFlow(0);
     if (pass) {
       char h[18];
-      hexEncode(card.arqc, 8, h);
+      HexUtils::toCompact(card.arqc, 8, h);
       snprintf(detail, sizeof(detail), "ARQC: %s | PAN: %s | %s", h, card.pan,
                card.aidName);
     } else
@@ -2137,8 +2116,8 @@ static void handleTest(WiFiClient &client, const String &id) {
     pass = runEmvFlow(amt);
     if (pass) {
       char h[18], atcH[6];
-      hexEncode(card.arqc, 8, h);
-      hexEncode(card.atc, 2, atcH);
+      HexUtils::toCompact(card.arqc, 8, h);
+      HexUtils::toCompact(card.atc, 2, atcH);
       snprintf(detail, sizeof(detail),
                "%s OK | PAN: %s | ARQC: %s | ATC: %s | %s", amtStr, card.pan, h,
                atcH, card.aidName);
@@ -2189,7 +2168,7 @@ static void handleTest(WiFiClient &client, const String &id) {
       txOk[i] = runEmvFlow(500);
       if (txOk[i]) {
         atcVal[i] = (card.atc[0] << 8) | card.atc[1];
-        hexEncode(card.arqc, 8, arqcStr[i]);
+        HexUtils::toCompact(card.arqc, 8, arqcStr[i]);
         SLOGF("Txn%d ARQC: %s ATC: %04X", i + 1, arqcStr[i], atcVal[i]);
       } else {
         SLOGF("Txn%d: FAIL", i + 1);
@@ -2363,7 +2342,7 @@ static void handleTest(WiFiClient &client, const String &id) {
       bool sda = (b1 >> 6) & 1, dda = (b1 >> 5) & 1, cv = (b1 >> 4) & 1,
            trm = (b1 >> 3) & 1, ia = (b1 >> 2) & 1, cda = (b1 >> 0) & 1;
       char h[6];
-      hexEncode(aipP, 2, h);
+      HexUtils::toCompact(aipP, 2, h);
       snprintf(detail, sizeof(detail),
                "AIP: %s | SDA:%s DDA:%s CDA:%s CV:%s IA:%s TRM:%s", h,
                sda ? "SI" : "no", dda ? "SI" : "no", cda ? "SI" : "no",
@@ -2405,7 +2384,7 @@ static void handleTest(WiFiClient &client, const String &id) {
       uint8_t *p = tlvFind(buf, blen, tag, &l);
       if (p && l > 0) {
         char h[32];
-        hexEncode(p, min(l, 12), h);
+        HexUtils::toCompact(p, min(l, 12), h);
         char tmp[60];
         snprintf(tmp, sizeof(tmp), "%s: %s  ", name, h);
         if (strlen(found) + strlen(tmp) < sizeof(found))
@@ -2426,7 +2405,7 @@ static void handleTest(WiFiClient &client, const String &id) {
     uint8_t *pdol = tlvFind(fci, fciLen - 2, 0x9F38, &pdolL);
     if (pdol && pdolL > 0) {
       char h[50];
-      hexEncode(pdol, min(pdolL, 20), h);
+      HexUtils::toCompact(pdol, min(pdolL, 20), h);
       SLOGF("PDOL: %s", h);
     }
     pass = got;
@@ -2459,7 +2438,7 @@ static void handleTest(WiFiClient &client, const String &id) {
     for (int a = 0; a < NUM_AIDS && !aidOk; a++) {
       if (selectAID(AIDS[a].bytes, AIDS[a].len, fci, fciLen)) {
         strncpy(card.aidName, AIDS[a].name, sizeof(card.aidName) - 1);
-        hexEncode(AIDS[a].bytes, AIDS[a].len, card.aidHex);
+        HexUtils::toCompact(AIDS[a].bytes, AIDS[a].len, card.aidHex);
         aidOk = true;
       }
     }
@@ -2549,8 +2528,8 @@ static void handleTest(WiFiClient &client, const String &id) {
     pass = runEmvFlow(gTestAmt);
     if (pass) {
       char h[18], atcH[6];
-      hexEncode(card.arqc, 8, h);
-      hexEncode(card.atc, 2, atcH);
+      HexUtils::toCompact(card.arqc, 8, h);
+      HexUtils::toCompact(card.atc, 2, atcH);
       snprintf(detail, sizeof(detail),
                "$%lu.%02lu MXN | PAN: %s | ARQC: %s | ATC: %s | %s",
                (unsigned long)(gTestAmt / 100), (unsigned long)(gTestAmt % 100),
@@ -2737,7 +2716,7 @@ static void handleClient(WiFiClient &client) {
       const byte *uid = nfc.remoteDevice.getNFCID();
       unsigned int n = nfc.remoteDevice.getNFCIDLen();
       char uidhex[48];
-      hexEncode(uid, (int)n, uidhex);
+      HexUtils::toCompact(uid, (int)n, uidhex);
       char b[128];
       snprintf(b, sizeof(b),
                "{\"ok\":true,\"proto\":%d,\"tech\":%d,\"uid\":\"%s\"}",
@@ -2763,7 +2742,7 @@ static void handleClient(WiFiClient &client) {
 
   } else if (reqLine.startsWith("GET /emu")) { // emula tag NDEF (hex)
     String hx = qparam(reqLine, "hex");
-    gEmuLen = hexDecode(hx.c_str(), gEmuBuf, sizeof(gEmuBuf));
+    gEmuLen = HexUtils::decode(hx.c_str(), gEmuBuf, sizeof(gEmuBuf));
     if (gEmuLen < 0)
       gEmuLen = 0;
     // Arranca la emulación persistente (la bombea loop()) y responde enseguida;
@@ -2874,7 +2853,7 @@ static const uint8_t EMU_SEL_NDEF[] = {0x00, 0xA4, 0x00, 0x0C,
 // Reporta por serie qué está pidiendo el lector (consola en vivo de EMVy).
 static void emuOnReaderApdu(const uint8_t *cmd, uint8_t n) {
   char hx[520];
-  hexEncode(cmd, n > 256 ? 256 : n, hx);
+  HexUtils::toCompact(cmd, n > 256 ? 256 : n, hx);
   if (n >= (uint8_t)sizeof(EMU_SEL_APP) &&
       !memcmp(cmd, EMU_SEL_APP, sizeof(EMU_SEL_APP))) {
     Serial.print("EMU:RX SELECT-APP D2760000850101 ");
@@ -3271,15 +3250,16 @@ static void emvParseCard(const String &p) {
     if (tok.length()) {
       if (f == 0)
         gCardAidLen =
-            (uint8_t)hexDecode(tok.c_str(), gCardAid, sizeof(gCardAid));
+            (uint8_t)HexUtils::decode(tok.c_str(), gCardAid, sizeof(gCardAid));
       else if (f == 1)
         gCardPanLen =
-            (uint8_t)hexDecode(tok.c_str(), gCardPan, sizeof(gCardPan));
+            (uint8_t)HexUtils::decode(tok.c_str(), gCardPan, sizeof(gCardPan));
       else if (f == 2)
         gCardExpLen =
-            (uint8_t)hexDecode(tok.c_str(), gCardExp, sizeof(gCardExp));
+            (uint8_t)HexUtils::decode(tok.c_str(), gCardExp, sizeof(gCardExp));
       else if (f == 3)
-        gCardT2Len = (uint8_t)hexDecode(tok.c_str(), gCardT2, sizeof(gCardT2));
+        gCardT2Len =
+            (uint8_t)HexUtils::decode(tok.c_str(), gCardT2, sizeof(gCardT2));
     }
     if (bar < 0)
       break;
@@ -3303,9 +3283,11 @@ static void emvParseCard(const String &p) {
 static bool storeScannedCard() {
   gCardAidLen = gCardPanLen = gCardExpLen = gCardT2Len = 0;
   if (card.aidHex[0])
-    gCardAidLen = (uint8_t)hexDecode(card.aidHex, gCardAid, sizeof(gCardAid));
+    gCardAidLen =
+        (uint8_t)HexUtils::decode(card.aidHex, gCardAid, sizeof(gCardAid));
   if (card.track2[0])
-    gCardT2Len = (uint8_t)hexDecode(card.track2, gCardT2, sizeof(gCardT2));
+    gCardT2Len =
+        (uint8_t)HexUtils::decode(card.track2, gCardT2, sizeof(gCardT2));
   if (card.pan[0]) { // dígitos → BCD (pad 'F' si impar)
     char tmp[26];
     strncpy(tmp, card.pan, sizeof(tmp) - 2);
@@ -3315,7 +3297,7 @@ static bool storeScannedCard() {
       tmp[l] = 'F';
       tmp[l + 1] = '\0';
     }
-    gCardPanLen = (uint8_t)hexDecode(tmp, gCardPan, sizeof(gCardPan));
+    gCardPanLen = (uint8_t)HexUtils::decode(tmp, gCardPan, sizeof(gCardPan));
   }
   if (card.expiry[0]) { // YYMM → YYMMDD
     char e[8] = "";
@@ -3323,7 +3305,7 @@ static bool storeScannedCard() {
     e[4] = '\0';
     if (strlen(e) == 4)
       strcat(e, "31");
-    gCardExpLen = (uint8_t)hexDecode(e, gCardExp, sizeof(gCardExp));
+    gCardExpLen = (uint8_t)HexUtils::decode(e, gCardExp, sizeof(gCardExp));
   }
   gCardCustom = (gCardAidLen || gCardPanLen || gCardT2Len);
   return gCardCustom;
@@ -3338,7 +3320,7 @@ static void emvLogDol(const char *which, const DolItem *dol, int n,
     if (off + L > datalen)
       L = datalen - off;
     char hx[64];
-    hexEncode(&data[off], L > 28 ? 28 : L, hx);
+    HexUtils::toCompact(&data[off], L > 28 ? 28 : L, hx);
     char t[8];
     if (dol[k].tag > 0xFF)
       snprintf(t, sizeof(t), "%04X", dol[k].tag);
@@ -3422,7 +3404,7 @@ static void emvCardRespond(const uint8_t *cmd, uint8_t n, uint8_t *rsp,
 // emvCardRespond).
 static void emvLogCmd(const uint8_t *cmd, uint8_t n) {
   char hx[600];
-  hexEncode(cmd, n > 256 ? 256 : n, hx);
+  HexUtils::toCompact(cmd, n > 256 ? 256 : n, hx);
   uint8_t cla = cmd[0], ins = cmd[1];
   uint8_t p1 = (n > 2 ? cmd[2] : 0), p2 = (n > 3 ? cmd[3] : 0);
   if (ins == 0xA4 && p1 == 0x04) {
@@ -3434,7 +3416,7 @@ static void emvLogCmd(const uint8_t *cmd, uint8_t n) {
       Serial.println(hx);
     } else {
       char aidhx[40];
-      hexEncode(d, lc > 16 ? 16 : lc, aidhx);
+      HexUtils::toCompact(d, lc > 16 ? 16 : lc, aidhx);
       Serial.print("EMU:RX SELECT-AID ");
       Serial.print(aidhx);
       Serial.print(" (");
@@ -3557,7 +3539,7 @@ static void emuPump() {
     else
       emuOnReaderApdu(cmd, cmdSize);
     char hx[520];
-    hexEncode(rsp, rspSize > 256 ? 256 : rspSize, hx);
+    HexUtils::toCompact(rsp, rspSize > 256 ? 256 : rspSize, hx);
     Serial.print("EMU:TX ");
     Serial.println(hx);
     if (gEmuSent) {
@@ -3718,7 +3700,7 @@ bool emvyCommand(const char *verb, char *args) {
     String hx = c.substring(5);
     hx.trim();
     uint8_t apdu[264];
-    int alen = hexDecode(hx.c_str(), apdu, sizeof(apdu));
+    int alen = HexUtils::decode(hx.c_str(), apdu, sizeof(apdu));
     if (alen < 4) {
       Serial.println("ERR:BADAPDU");
       return true;
@@ -3737,7 +3719,7 @@ bool emvyCommand(const char *verb, char *args) {
     }
     drainNciFragments(resp, rlen);
     char out[600];
-    hexEncode(resp, rlen, out);
+    HexUtils::toCompact(resp, rlen, out);
     Serial.print("RESP:");
     Serial.println(out);
     return true;
@@ -3832,7 +3814,7 @@ bool emvyCommand(const char *verb, char *args) {
   if (up.startsWith("EMU:")) {
     String hx = c.substring(4);
     hx.trim();
-    gEmuLen = hexDecode(hx.c_str(), gEmuBuf, sizeof(gEmuBuf));
+    gEmuLen = HexUtils::decode(hx.c_str(), gEmuBuf, sizeof(gEmuBuf));
     if (gEmuLen < 0)
       gEmuLen = 0; // mensaje vacío es válido (tag vacío)
     emuStart(0);
