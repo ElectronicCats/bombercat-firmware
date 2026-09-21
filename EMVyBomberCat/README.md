@@ -70,7 +70,7 @@ identifique la placa de forma **idéntica** al resto del monorepo:
 | Estímulo (host→device) | Respuesta (device→host)                    | Cláusula |
 |------------------------|--------------------------------------------|----------|
 | `ping` (o `PING`/`Ping`) | `+OK bombercat`  (sin data lines)        | §5, C-6/C-7 |
-| `info`                 | `:fw` · `:fw_name emvybombercat` · `:state <idle\|scanning\|emulating>` · `+OK` | §6.1, C-8 |
+| `info`                 | `:fw` · `:fw_name emvybombercat` · `:state <idle\|scanning\|emulating\|hw-error>` · `+OK` | §6.1, C-8 |
 | `identify`             | `+OK` inmediato + parpadeo de LED asíncrono (~2 s) | §6.2, C-9 |
 | `<verbo desconocido>`  | `-ERR unknown command <verb>`              | §6.3.3, C-11 |
 
@@ -82,6 +82,10 @@ identifique la placa de forma **idéntica** al resto del monorepo:
   al instante y el LED (`LED_BUILTIN`, ~2 s / toggle cada 150 ms) lo bombea `core` desde
   `control.poll()` (§6.2.1) — EMVy no necesita un `identifyPump()` propio.
 - `:state` reemplaza al antiguo `:role emv-multitool` (divergencia ya corregida).
+- **Fase 5.** El acceso al PN7150 pasa por `NfcController` (`core/`), cerrando la doble ruta
+  al chip; un fallo de bring-up de NFC o de WiFi ya no cuelga el firmware en `while(true)` —
+  el plano de control se levanta *antes* del bring-up de hardware, así que `ping`/`info`
+  siguen respondiendo y `:state` reporta `hw-error` en vez de dejar la placa muda.
 
 **Desviación conocida (transitoria).** Los verbos **operativos** (`WAIT`/`APDU:`→`RESP:`,
 `SCAN`→`JSON_*`, `EMU:`/`EMUEMV`→`EMU:*`, `MAG:`/`RELEASE`/`STOP`→`OK`) conservan el
@@ -95,7 +99,7 @@ que la placa aparezca con ✓ en `device list`— ya es conforme.
 ## Estructura (sketch multi-archivo — Arduino concatena los .ino)
 
 - `EMVyBomberCat.ino` — base: lector EMV + passthrough + servidor web + dispatcher serie.
-- `modes_tags.ino`    — modo TAGS (reusa el objeto `nfc` PN7150).
+- `modes_tags.ino`    — modo TAGS (reusa el objeto global `nfc`, `NfcController` desde la Fase 5).
 - `modes_mag.ino`     — modo MAG (magspoof, pines A=6/B=7).
 
 ## Compilar y flashear

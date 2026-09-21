@@ -1,12 +1,14 @@
 // EMVyBomberCat — modo TAGS: lee un tag NFC y emite su UID.
-// Reutiliza el objeto global `nfc` (Electroniccats_PN7150) del sketch
-// principal. Basado en el ejemplo oficial DetectTags de Electronic Cats.
+// Reutiliza el objeto global `nfc` (NfcController, Fase 5) del sketch
+// principal; las primitivas que NfcController no re-expone (remoteDevice,
+// isTagDetected, reset "ligero" de la librería) se alcanzan vía nfc.raw().
+// Basado en el ejemplo oficial DetectTags de Electronic Cats.
 
 void emvyTagsRead() {
   unsigned long t = millis();
   bool found = false;
   while (millis() - t < 8000) { // espera hasta 8 s por un tag
-    if (nfc.isTagDetected()) {
+    if (nfc.raw().isTagDetected()) {
       found = true;
       break;
     }
@@ -17,12 +19,13 @@ void emvyTagsRead() {
     return;
   }
 
-  const byte *uid = nfc.remoteDevice.getNFCID();
-  unsigned int n = nfc.remoteDevice.getNFCIDLen();
+  const byte *uid = nfc.raw().remoteDevice.getNFCID();
+  unsigned int n = nfc.raw().remoteDevice.getNFCIDLen();
   Serial.print("TAG:");
-  Serial.print(nfc.remoteDevice.getProtocol()); // protocolo (ISODEP/T2T/…)
+  Serial.print(
+      nfc.raw().remoteDevice.getProtocol()); // protocolo (ISODEP/T2T/…)
   Serial.print(" TECH:");
-  Serial.print(nfc.remoteDevice.getModeTech());
+  Serial.print(nfc.raw().remoteDevice.getModeTech());
   Serial.print(" UID:");
   // Formato TAG:/TECH:/UID: mantenido por retrocompatibilidad con emvyctl
   // (ver PLAN_IMPLEMENTACION_EMVYBOMBERCAT.md, Fase 4 #6); el hex ahora se
@@ -34,5 +37,9 @@ void emvyTagsRead() {
   }
   Serial.println();
 
-  nfc.reset(); // reanuda discovery para el siguiente
+  // nfc.raw().reset() (Electroniccats_PN7150::reset(), no
+  // NfcController::reset()): es el "reanude discovery" ligero de la
+  // librería, distinto del bring-up completo — ver nota de Fase 5 en
+  // EMVyBomberCat.ino sobre por qué no se confunden.
+  nfc.raw().reset();
 }

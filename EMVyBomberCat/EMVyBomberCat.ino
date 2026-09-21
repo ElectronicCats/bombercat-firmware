@@ -2,7 +2,9 @@
  * EMVyBomberCat — firmware "navaja suiza" de EMVy Controller
  * ============================================================
  * Board : BomberCat (Electronic Cats) — RP2040 mbed + NINA-W102
- * NFC   : PN7150 (I2C, 0x28)
+ * NFC   : PN7150 (I2C, 0x28) vía `core/src/NfcController` (Fase 5) — único
+ *         punto de acceso al chip; `nfc.raw()` alcanza las primitivas que
+ *         NfcController no re-expone (remoteDevice/protocol/readerTagCmd/…).
  *
  * Pines FIJOS — NO modificar:
  *   IRQ=11  VEN=13  ADDR=0x28
@@ -21,7 +23,7 @@
  * la placa de forma idéntica:
  *   ping     (case-insensitive) -> `+OK bombercat`   (§5, handshake)
  *   info     -> `:fw_name emvybombercat` `:fw <v>` `:state <idle|scanning|
- *               emulating>` `+OK` (§6.1)
+ *               emulating|hw-error>` `+OK` (§6.1)
  *   identify -> `+OK` inmediato + parpadeo LED asíncrono (§6.2)
  *   <verbo desconocido> -> `-ERR unknown command <verb>` (§6.3.3)
  * Los verbos OPERATIVOS de abajo (WAIT/APDU:/EMU:/…) los atiende el hook
@@ -46,6 +48,7 @@
 #include <Electroniccats_PN7150.h>
 #include <HexUtils.h>
 #include <MagStripe.h>
+#include <NfcController.h>
 #include <TagReader.h>
 #include <WiFiNINA.h>
 #include <Wire.h>
@@ -65,7 +68,11 @@ WiFiServer server(80);
 #define PN7150_IRQ (11)
 #define PN7150_VEN (13)
 #define PN7150_ADDR (0x28)
-Electroniccats_PN7150 nfc(PN7150_IRQ, PN7150_VEN, PN7150_ADDR, PN7150);
+// Único punto de acceso al PN7150 (Fase 5): NfcController evita la doble ruta
+// al chip que existía al enlazar `core` sin adoptarlo. Las primitivas que no
+// re-expone (remoteDevice/protocol/readerTagCmd/cardModeSend/Receive/…) se
+// alcanzan vía nfc.raw() — mismo objeto físico, sin reescribir el kernel EMV.
+NfcController nfc(PN7150_IRQ, PN7150_VEN, PN7150_ADDR, PN7150);
 
 // BomberCat serial-control REPL (ping/info/identify) — plano de descubrimiento
 // canónico consumido por bombercat-tools/emvyctl. Slug debe coincidir con el
@@ -74,13 +81,19 @@ BomberCatControl control(Serial, BOMBERCAT_FW_VERSION, "emvybombercat");
 
 // true tras un WAIT/APDU exitoso; false tras RELEASE o un fallo de
 // transmisión. Ver nota en el handler de WAIT sobre por qué APDU: no puede
-// re-consultar nfc.isTagDetected() directamente.
+// re-consultar nfc.raw().isTagDetected() directamente.
 static bool gPassthroughActive = false;
 
 // Estado del plano de control (reportado por `info`/:state): true mientras se
 // espera una tarjeta/tag (WAIT/SCAN/CARDSCAN/TAG). "emulating" se deriva de
 // gEmuActive (ver más abajo); controlState() combina ambas señales.
 static bool gScanningCard = false;
+
+// Fase 5: fallos de bring-up (NFC/WiFi) ya no cuelgan el firmware en
+// `while(true)` — quedan registrados aquí y controlState() los reporta como
+// "hw-error" para que el host siga viendo la placa (ping sigue respondiendo).
+static bool gNfcFault = false;
+static bool gWifiFault = false;
 
 // Emulación NDEF (comando EMU:): el BomberCat se hace pasar por un tag NFC
 // Forum Type 4 sirviendo un mensaje NDEF arbitrario (posiblemente malformado,
@@ -343,7 +356,7 @@ static uint8_t *tlvFind(uint8_t *buf, int bufLen, uint16_t tag, int *outLen) {
 static void drainNciFragments(uint8_t *resp, uint8_t &respLen) {
   for (int frag = 0; frag < 16 && respLen < 252; frag++) {
     delay(10);
-    if (!nfc.hasMessage())
+    if (!nfc.raw().hasMessage())
       break;
     uint8_t hdr[3];
     Wire.requestFrom((uint8_t)PN7150_ADDR, (uint8_t)3);
@@ -380,7 +393,7 @@ static bool apduExchange(uint8_t *cmd, uint8_t cmdLen, uint8_t *resp,
     }
     delay(20);
     respLen = 0;
-    bool err = nfc.readerTagCmd(cmd, cmdLen, resp, &respLen);
+    bool err = nfc.raw().readerTagCmd(cmd, cmdLen, resp, &respLen);
     if (err) {
       Serial.print("# APDU ERR: ");
       Serial.println(label);
@@ -398,7 +411,7 @@ static bool apduExchange(uint8_t *cmd, uint8_t cmdLen, uint8_t *resp,
       uint8_t grResp[256];
       uint8_t grLen = 0;
       delay(20);
-      if (!nfc.readerTagCmd(gr, sizeof(gr), grResp, &grLen)) {
+      if (!nfc.raw().readerTagCmd(gr, sizeof(gr), grResp, &grLen)) {
         drainNciFragments(grResp, grLen);
         if (grLen >= 2) {
           uint8_t origData = respLen - 2;
@@ -822,15 +835,15 @@ static bool runEmvFlow(uint64_t amountCents) {
   for (int attempt = 0; attempt < 3; attempt++) {
     if (attempt > 0) {
       SLOGF("# Reintento EMV %d/3...", attempt + 1);
-      nfc.waitForTagRemoval();
-      nfc.stopDiscovery();
-      nfc.startDiscovery();
+      nfc.raw().waitForTagRemoval();
+      nfc.raw().stopDiscovery();
+      nfc.raw().startDiscovery();
       // Esperar re-detección de la tarjeta (máx 6s)
       unsigned long tw = millis();
       bool found = false;
       while (millis() - tw < 6000) {
-        if (nfc.isTagDetected() &&
-            nfc.remoteDevice.getProtocol() == nfc.protocol.ISODEP) {
+        if (nfc.raw().isTagDetected() &&
+            nfc.raw().remoteDevice.getProtocol() == nfc.raw().protocol.ISODEP) {
           found = true;
           break;
         }
@@ -856,8 +869,8 @@ static bool pollCard(unsigned long timeoutMs = 20000) {
   unsigned long t = millis();
   int lastSec = -1;
   while (millis() - t < timeoutMs) {
-    if (nfc.isTagDetected() &&
-        nfc.remoteDevice.getProtocol() == nfc.protocol.ISODEP)
+    if (nfc.raw().isTagDetected() &&
+        nfc.raw().remoteDevice.getProtocol() == nfc.raw().protocol.ISODEP)
       return true;
     int sec = (int)((millis() - t) / 1000);
     if (sec != lastSec) {
@@ -871,9 +884,9 @@ static bool pollCard(unsigned long timeoutMs = 20000) {
 }
 
 static void releaseCard() {
-  nfc.waitForTagRemoval();
-  nfc.stopDiscovery();
-  nfc.startDiscovery();
+  nfc.raw().waitForTagRemoval();
+  nfc.raw().stopDiscovery();
+  nfc.raw().startDiscovery();
 }
 
 // ---------------------------------------------------------------------------
@@ -1428,23 +1441,17 @@ static const char PAGE_HTML[] =
 // ---------------------------------------------------------------------------
 // NFC reset
 // ---------------------------------------------------------------------------
+// NfcController::reset() reproduce connectNCI+configureSettings+configMode+
+// startDiscovery en ese orden (igual que el bring-up legacy), pero devuelve
+// false en vez de colgar en while(true) — el fallo queda en gNfcFault, que
+// controlState() reporta como "hw-error" sin dejar la placa muda.
 static void resetNFC() {
-  if (nfc.connectNCI()) {
-    Serial.println("# ERROR connectNCI");
-    while (true)
-      delay(1000);
+  gNfcFault = !nfc.reset();
+  if (gNfcFault) {
+    Serial.println("# ERROR NFC bring-up (connectNCI/configureSettings/"
+                   "configMode) — chip no responde; usa NFCINFO para "
+                   "reintentar");
   }
-  if (nfc.configureSettings()) {
-    Serial.println("# ERROR configureSettings");
-    while (true)
-      delay(1000);
-  }
-  if (nfc.configMode()) {
-    Serial.println("# ERROR configMode");
-    while (true)
-      delay(1000);
-  }
-  nfc.startDiscovery();
 }
 
 // ---------------------------------------------------------------------------
@@ -1534,11 +1541,11 @@ static void handleTest(WiFiClient &client, const String &id) {
   if (id == "hw_nfc") {
     SLOGF("Verificando PN7150 via NCI (IRQ=%d VEN=%d)...", PN7150_IRQ,
           PN7150_VEN);
-    pass = (nfc.connectNCI() == 0);
+    pass = (nfc.raw().connectNCI() == 0);
     if (pass) {
-      nfc.configureSettings();
-      nfc.configMode();
-      nfc.startDiscovery();
+      nfc.raw().configureSettings();
+      nfc.raw().configMode();
+      nfc.raw().startDiscovery();
       SLOGF("NCI OK — I2C 0x%02X", PN7150_ADDR);
       snprintf(detail, sizeof(detail),
                "PN7150 NCI OK | IRQ=%d VEN=%d I2C=0x%02X", PN7150_IRQ,
@@ -1579,7 +1586,7 @@ static void handleTest(WiFiClient &client, const String &id) {
     unsigned long tw = millis();
     bool found = false;
     while (millis() - tw < 15000) {
-      if (nfc.isTagDetected()) {
+      if (nfc.raw().isTagDetected()) {
         found = true;
         break;
       }
@@ -1591,30 +1598,31 @@ static void handleTest(WiFiClient &client, const String &id) {
       return;
     }
     pass = true;
-    int p = nfc.remoteDevice.getProtocol();
+    int p = nfc.raw().remoteDevice.getProtocol();
     const char *proto = "desconocido";
-    if (p == nfc.protocol.ISODEP)
+    if (p == nfc.raw().protocol.ISODEP)
       proto = "ISO-DEP (EMV contactless)";
-    else if (p == nfc.protocol.ISO15693)
+    else if (p == nfc.raw().protocol.ISO15693)
       proto = "ISO 15693 (vicinity)";
-    else if (p == nfc.protocol.MIFARE)
+    else if (p == nfc.raw().protocol.MIFARE)
       proto = "MIFARE";
-    else if (p == nfc.protocol.T3T)
+    else if (p == nfc.raw().protocol.T3T)
       proto = "T3T / FeliCa";
     snprintf(detail, sizeof(detail), "Tag detectado: %s (proto=0x%02X)", proto,
              p);
     SLOGF("Protocolo: %s", proto);
-    nfc.waitForTagRemoval();
-    nfc.stopDiscovery();
-    nfc.startDiscovery();
+    nfc.raw().waitForTagRemoval();
+    nfc.raw().stopDiscovery();
+    nfc.raw().startDiscovery();
 
   } else if (id == "nfc_iso") {
     unsigned long tw = millis();
     bool found = false, isISO = false;
     while (millis() - tw < 15000) {
-      if (nfc.isTagDetected()) {
+      if (nfc.raw().isTagDetected()) {
         found = true;
-        isISO = (nfc.remoteDevice.getProtocol() == nfc.protocol.ISODEP);
+        isISO =
+            (nfc.raw().remoteDevice.getProtocol() == nfc.raw().protocol.ISODEP);
         break;
       }
       control.poll(); // atiende ping/info/identify durante la espera
@@ -1630,10 +1638,10 @@ static void handleTest(WiFiClient &client, const String &id) {
     else
       snprintf(detail, sizeof(detail),
                "Tag no es ISO-DEP (proto=%d) — no es tarjeta de pago",
-               nfc.remoteDevice.getProtocol());
-    nfc.waitForTagRemoval();
-    nfc.stopDiscovery();
-    nfc.startDiscovery();
+               nfc.raw().remoteDevice.getProtocol());
+    nfc.raw().waitForTagRemoval();
+    nfc.raw().stopDiscovery();
+    nfc.raw().startDiscovery();
 
     // =========================================================
     // CARD IDENTIFICATION
@@ -2140,14 +2148,15 @@ static void handleTest(WiFiClient &client, const String &id) {
     for (int i = 0; i < 3; i++) {
       if (i > 0) {
         // Reiniciar descubrimiento y esperar re-deteccion
-        nfc.waitForTagRemoval();
-        nfc.stopDiscovery();
-        nfc.startDiscovery();
+        nfc.raw().waitForTagRemoval();
+        nfc.raw().stopDiscovery();
+        nfc.raw().startDiscovery();
         unsigned long tw = millis();
         bool ref = false;
         while (millis() - tw < 8000) {
-          if (nfc.isTagDetected() &&
-              nfc.remoteDevice.getProtocol() == nfc.protocol.ISODEP) {
+          if (nfc.raw().isTagDetected() &&
+              nfc.raw().remoteDevice.getProtocol() ==
+                  nfc.raw().protocol.ISODEP) {
             ref = true;
             break;
           }
@@ -2598,8 +2607,8 @@ static void handleClient(WiFiClient &client) {
     bool tagFound = false;
     unsigned long tw = millis();
     while (millis() - tw < 15000) {
-      if (nfc.isTagDetected() &&
-          nfc.remoteDevice.getProtocol() == nfc.protocol.ISODEP) {
+      if (nfc.raw().isTagDetected() &&
+          nfc.raw().remoteDevice.getProtocol() == nfc.raw().protocol.ISODEP) {
         tagFound = true;
         break;
       }
@@ -2619,9 +2628,9 @@ static void handleClient(WiFiClient &client) {
       } else {
         sendJson(client, "{\"ok\":false,\"error\":\"Flujo EMV fallo\"}");
       }
-      nfc.waitForTagRemoval();
-      nfc.stopDiscovery();
-      nfc.startDiscovery();
+      nfc.raw().waitForTagRemoval();
+      nfc.raw().stopDiscovery();
+      nfc.raw().startDiscovery();
       Serial.println("# Listo.");
     }
 
@@ -2704,7 +2713,7 @@ static void handleClient(WiFiClient &client) {
     unsigned long t = millis();
     bool found = false;
     while (millis() - t < 8000) {
-      if (nfc.isTagDetected()) {
+      if (nfc.raw().isTagDetected()) {
         found = true;
         break;
       }
@@ -2713,30 +2722,30 @@ static void handleClient(WiFiClient &client) {
     if (!found) {
       sendJson(client, "{\"ok\":false,\"error\":\"sin tag en 8s\"}");
     } else {
-      const byte *uid = nfc.remoteDevice.getNFCID();
-      unsigned int n = nfc.remoteDevice.getNFCIDLen();
+      const byte *uid = nfc.raw().remoteDevice.getNFCID();
+      unsigned int n = nfc.raw().remoteDevice.getNFCIDLen();
       char uidhex[48];
       HexUtils::toCompact(uid, (int)n, uidhex);
       char b[128];
       snprintf(b, sizeof(b),
                "{\"ok\":true,\"proto\":%d,\"tech\":%d,\"uid\":\"%s\"}",
-               nfc.remoteDevice.getProtocol(), nfc.remoteDevice.getModeTech(),
-               uidhex);
+               nfc.raw().remoteDevice.getProtocol(),
+               nfc.raw().remoteDevice.getModeTech(), uidhex);
       sendJson(client, b);
-      nfc.reset();
+      nfc.raw().reset();
     }
 
   } else if (reqLine.startsWith("GET /nfcinfo")) { // diagnóstico: chip vivo?
-    uint8_t err = nfc.connectNCI();
+    uint8_t err = nfc.raw().connectNCI();
     if (err) {
       sendJson(client, "{\"ok\":false,\"error\":\"connectNCI\"}");
     } else {
       char b[80];
       snprintf(b, sizeof(b), "{\"ok\":true,\"fwver\":%d}",
-               nfc.getFirmwareVersion());
-      nfc.configureSettings();
-      nfc.configMode();
-      nfc.startDiscovery();
+               nfc.raw().getFirmwareVersion());
+      nfc.raw().configureSettings();
+      nfc.raw().configMode();
+      nfc.raw().startDiscovery();
       sendJson(client, b);
     }
 
@@ -2793,45 +2802,56 @@ void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, LOW);
 #endif
-  if (WiFi.status() == WL_NO_MODULE) {
-    Serial.println("# ERROR: WiFi no encontrado");
-    while (true)
-      delay(1000);
-  }
-  if (WiFi.beginAP(AP_SSID, AP_PASS) != WL_AP_LISTENING) {
-    Serial.println("# ERROR: AP fallo");
-    while (true)
-      delay(1000);
-  }
-  server.begin();
-  IPAddress ip = WiFi.localIP();
-  {
-    char _b[80];
-    snprintf(_b, sizeof(_b), "# AP: %s | http://%d.%d.%d.%d", AP_SSID, ip[0],
-             ip[1], ip[2], ip[3]);
-    Serial.println(_b);
-  }
-  resetNFC();
-  emvyMagInit();
-  Serial.println("# EMVyBomberCat listo — navaja suiza: EMV/APDU/TAGS/MAG");
-  Serial.println("# Acerca la tarjeta contactless...");
 
+  // Fase 5: el plano de control se levanta ANTES del bring-up de WiFi/NFC,
+  // para que un fallo de cualquiera de los dos deje la placa reportando
+  // "hw-error" en vez de muda — antes un fallo de WiFi colgaba el setup()
+  // en while(true) sin llegar nunca a control.begin(), y ni siquiera `ping`
+  // respondía. Cambio observable: "+OK bombercat ready" ahora se emite antes
+  // que las líneas "# AP:"/"# ERROR:" (no afecta al contrato de
+  // descubrimiento, que no depende de este orden).
   BomberCatControl::Callbacks cb;
   cb.state = controlState;
   cb.command = emvyCommand;
   control.setCallbacks(cb);
   control.begin(); // anuncia listo al host CLI (+OK bombercat ready)
+
+  gWifiFault = (WiFi.status() == WL_NO_MODULE);
+  if (gWifiFault) {
+    Serial.println("# ERROR: WiFi no encontrado");
+  } else {
+    gWifiFault = (WiFi.beginAP(AP_SSID, AP_PASS) != WL_AP_LISTENING);
+    if (gWifiFault) {
+      Serial.println("# ERROR: AP fallo");
+    } else {
+      server.begin();
+      IPAddress ip = WiFi.localIP();
+      char _b[80];
+      snprintf(_b, sizeof(_b), "# AP: %s | http://%d.%d.%d.%d", AP_SSID, ip[0],
+               ip[1], ip[2], ip[3]);
+      Serial.println(_b);
+    }
+  }
+
+  resetNFC(); // ya no cuelga: gNfcFault queda registrado si el chip no responde
+  emvyMagInit();
+  Serial.println("# EMVyBomberCat listo — navaja suiza: EMV/APDU/TAGS/MAG");
+  Serial.println("# Acerca la tarjeta contactless...");
 }
 
 // Estado del plano de control (reportado por `info`/:state): "emulating"
 // mientras hay una emulación NDEF/EMV en curso (gEmuActive), "scanning"
-// mientras se espera una tarjeta/tag (WAIT/SCAN/CARDSCAN/TAG), "idle" en
-// cualquier otro momento.
+// mientras se espera una tarjeta/tag (WAIT/SCAN/CARDSCAN/TAG), "hw-error"
+// (Fase 5) si el bring-up de NFC o WiFi falló — la placa sigue respondiendo
+// ping/info aunque el hardware no esté listo —, "idle" en cualquier otro
+// momento.
 const char *controlState() {
   if (gEmuActive)
     return "emulating";
   if (gScanningCard)
     return "scanning";
+  if (gNfcFault || gWifiFault)
+    return "hw-error";
   return "idle";
 }
 
@@ -3463,8 +3483,8 @@ static void emuStop(const char *reason) {
   if (!gEmuActive)
     return;
   gEmuActive = false;
-  nfc.setReaderWriterMode();
-  nfc.startDiscovery();
+  nfc.raw().setReaderWriterMode();
+  nfc.raw().startDiscovery();
   gPassthroughActive = false;
   Serial.print("EMU:DONE sent=");
   Serial.print(gEmuSentCount);
@@ -3483,25 +3503,25 @@ static bool emuStart(int mode) {
   gEmuMode = mode;
   if (mode == 0) {
     emuMessage.setContent((const char *)gEmuBuf, (unsigned short)gEmuLen);
-    nfc.setSendMsgCallback(emuSentCallback);
+    nfc.raw().setSendMsgCallback(emuSentCallback);
   }
   gEmuSent = false;
   gEmuSentCount = 0;
   // setEmulationMode() (setMode+reset NCI) puede fallar la 1ª vez al venir de
   // un passthrough/dump intensivo (chip a media sesión de lector). Reintentar
   // tras re-inicializar el NCI lo recupera — igual que resetNFC() al arrancar.
-  bool ok = nfc.setEmulationMode();
+  bool ok = nfc.raw().setEmulationMode();
   for (int a = 0; !ok && a < 3; a++) {
-    nfc.connectNCI();
-    nfc.configureSettings();
-    nfc.configMode();
+    nfc.raw().connectNCI();
+    nfc.raw().configureSettings();
+    nfc.raw().configMode();
     delay(40);
-    ok = nfc.setEmulationMode();
+    ok = nfc.raw().setEmulationMode();
   }
   if (!ok) {
     Serial.println("ERR:EMU_MODE");
-    nfc.setReaderWriterMode();
-    nfc.startDiscovery();
+    nfc.raw().setReaderWriterMode();
+    nfc.raw().startDiscovery();
     return false;
   }
   gEmuActive = true;
@@ -3522,7 +3542,7 @@ static bool emuStart(int mode) {
 static void emuPump() {
   uint8_t cmd[256];
   uint8_t cmdSize = 0;
-  if (nfc.cardModeReceive(cmd, &cmdSize) == 0 && cmdSize >= 2) {
+  if (nfc.raw().cardModeReceive(cmd, &cmdSize) == 0 && cmdSize >= 2) {
     uint8_t rsp[256];
     unsigned short rspSize = 0;
     if (gEmuMode == 1)
@@ -3533,7 +3553,7 @@ static void emuPump() {
       rspSize = sizeof(rsp);
     // RESPONDER PRIMERO (mínima espera para el terminal; qVSDC es sensible al
     // FWT), y loguear DESPUÉS — el log por serie de un APDU tarda ~ms.
-    nfc.cardModeSend(rsp, (uint8_t)rspSize);
+    nfc.raw().cardModeSend(rsp, (uint8_t)rspSize);
     if (gEmuMode == 1)
       emvLogCmd(cmd, cmdSize);
     else
@@ -3610,18 +3630,18 @@ bool emvyCommand(const char *verb, char *args) {
   // discovery del lector. Útil cuando no se detectan tarjetas: si devuelve una
   // versión, el chip está vivo y el problema es RF (tarjeta/antena/colocación).
   if (up == "NFCINFO") {
-    uint8_t err = nfc.connectNCI();
+    uint8_t err = nfc.raw().connectNCI();
     if (err) {
       Serial.println("NFCINFO: ERR connectNCI (chip no responde)");
       return true;
     }
     char b[48];
     snprintf(b, sizeof(b), "NFCINFO: fwver=%d (chip vivo)",
-             nfc.getFirmwareVersion());
+             nfc.raw().getFirmwareVersion());
     Serial.println(b);
-    nfc.configureSettings();
-    nfc.configMode();
-    nfc.startDiscovery();
+    nfc.raw().configureSettings();
+    nfc.raw().configMode();
+    nfc.raw().startDiscovery();
     Serial.println("NFCINFO: discovery re-armado");
     return true;
   }
@@ -3664,7 +3684,7 @@ bool emvyCommand(const char *verb, char *args) {
     // No usa waitForTagRemoval() (a diferencia de RELEASE): aquí SÍ queremos
     // detectar de inmediato una tarjeta que ya esté puesta.
     gScanningCard = true;
-    nfc.reset();
+    nfc.raw().reset();
     unsigned long lastRearm = millis();
     bool found = false;
     unsigned long tw = millis();
@@ -3672,13 +3692,13 @@ bool emvyCommand(const char *verb, char *args) {
       // Sin atender clientes WiFi aquí (a diferencia de otros comandos): un
       // handleClient() sirviendo el dashboard puede tardar cientos de ms y
       // hacer que se pierda la ventana de la notificación NCI de activación.
-      if (nfc.isTagDetected() &&
-          nfc.remoteDevice.getProtocol() == nfc.protocol.ISODEP) {
+      if (nfc.raw().isTagDetected() &&
+          nfc.raw().remoteDevice.getProtocol() == nfc.raw().protocol.ISODEP) {
         found = true;
         break;
       }
       if (millis() - lastRearm > 2500) {
-        nfc.reset();
+        nfc.raw().reset();
         lastRearm = millis();
       }
       control.poll(); // atiende ping/info/identify durante la espera
@@ -3711,7 +3731,7 @@ bool emvyCommand(const char *verb, char *args) {
     }
     uint8_t resp[264];
     uint8_t rlen = 0;
-    if (nfc.readerTagCmd(apdu, (uint8_t)alen, resp, &rlen)) {
+    if (nfc.raw().readerTagCmd(apdu, (uint8_t)alen, resp, &rlen)) {
       gPassthroughActive =
           false; // fallo de transmisión: se asume tarjeta retirada
       Serial.println("ERR:TXFAIL");
@@ -3731,9 +3751,9 @@ bool emvyCommand(const char *verb, char *args) {
       return true;
     }
     gPassthroughActive = false;
-    nfc.waitForTagRemoval();
-    nfc.stopDiscovery();
-    nfc.startDiscovery();
+    nfc.raw().waitForTagRemoval();
+    nfc.raw().stopDiscovery();
+    nfc.raw().startDiscovery();
     Serial.println("OK");
     return true;
   }
@@ -3839,8 +3859,8 @@ bool emvyCommand(const char *verb, char *args) {
   bool tagFound = false;
   unsigned long tw = millis();
   while (millis() - tw < 30000) {
-    if (nfc.isTagDetected() &&
-        nfc.remoteDevice.getProtocol() == nfc.protocol.ISODEP) {
+    if (nfc.raw().isTagDetected() &&
+        nfc.raw().remoteDevice.getProtocol() == nfc.raw().protocol.ISODEP) {
       tagFound = true;
       break;
     }
@@ -3864,15 +3884,15 @@ bool emvyCommand(const char *verb, char *args) {
     Serial.println("JSON_START");
     Serial.println(webResult);
     Serial.println("JSON_END");
-    nfc.waitForTagRemoval();
-    nfc.stopDiscovery();
-    nfc.startDiscovery();
+    nfc.raw().waitForTagRemoval();
+    nfc.raw().stopDiscovery();
+    nfc.raw().startDiscovery();
     Serial.println("# Listo.");
   } else {
     Serial.println("# ERROR: Flujo EMV fallo — ver log");
-    nfc.waitForTagRemoval();
-    nfc.stopDiscovery();
-    nfc.startDiscovery();
+    nfc.raw().waitForTagRemoval();
+    nfc.raw().stopDiscovery();
+    nfc.raw().startDiscovery();
   }
   return true;
 }
