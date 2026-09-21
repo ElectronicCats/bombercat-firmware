@@ -15,17 +15,19 @@
  *   Protocolo EMV · Transacciones · Sondas de seguridad
  *
  * Plano de control — BomberCatControl Discovery Contract v1.0
- * (docs/BomberCatControl-Discovery-Contract.md): los comandos de
- * DESCUBRIMIENTO son conformes al contrato para que cualquier host (CLI del
- * vendor, GUI/TUI de EMVy) descubra e identifique la placa de forma idéntica:
+ * (docs/BomberCatControl-Discovery-Contract.md): ping/info/identify los sirve
+ * `core/src/BomberCatControl` (mismo REPL que MifareClassic/DetectTags/…) para
+ * que cualquier host (CLI del vendor, GUI/TUI de EMVy) descubra e identifique
+ * la placa de forma idéntica:
  *   ping     (case-insensitive) -> `+OK bombercat`   (§5, handshake)
- *   info                        -> `:fw_name emvybombercat` `:fw <v>` `+OK`
- * (§6.1) identify                    -> `+OK` inmediato + parpadeo LED
- * asíncrono (§6.2) <verbo desconocido>         -> `-ERR unknown command <verb>`
- * (§6.3.3) Los verbos OPERATIVOS de abajo (WAIT/APDU:/EMU:/…) conservan el
- * dialecto histórico por retrocompatibilidad con `emvy/readers/bombercat.py`
- * hasta que el host migre al framing +OK/-ERR (ver README §"Discovery
- * Contract").
+ *   info     -> `:fw_name emvybombercat` `:fw <v>` `:state <idle|scanning|
+ *               emulating>` `+OK` (§6.1)
+ *   identify -> `+OK` inmediato + parpadeo LED asíncrono (§6.2)
+ *   <verbo desconocido> -> `-ERR unknown command <verb>` (§6.3.3)
+ * Los verbos OPERATIVOS de abajo (WAIT/APDU:/EMU:/…) los atiende el hook
+ * `emvyCommand()` y conservan el dialecto histórico por retrocompatibilidad
+ * con `emvy/readers/bombercat.py` hasta que el host migre al framing +OK/-ERR
+ * (ver README §"Discovery Contract").
  *
  * Por serie (@115200) expone el mismo dispositivo a **EMVy Controller**
  * (`emvyctl.py`/`emvy`): passthrough de APDU (PING/WAIT/APDU:/RELEASE),
@@ -40,6 +42,7 @@
 
 #include "emv_emu.h" // struct DolItem (ver nota en el header sobre por qué)
 #include <ArduinoJson.h>
+#include <BomberCatControl.h>
 #include <Electroniccats_PN7150.h>
 #include <WiFiNINA.h>
 #include <Wire.h>
@@ -60,18 +63,21 @@ WiFiServer server(80);
 #define PN7150_VEN (13)
 #define PN7150_ADDR (0x28)
 Electroniccats_PN7150 nfc(PN7150_IRQ, PN7150_VEN, PN7150_ADDR, PN7150);
+
+// BomberCat serial-control REPL (ping/info/identify) — plano de descubrimiento
+// canónico consumido por bombercat-tools/emvyctl. Slug debe coincidir con el
+// registrado en bombercat-tools/firmwares.py y con descriptions.json.
+BomberCatControl control(Serial, BOMBERCAT_FW_VERSION, "emvybombercat");
+
 // true tras un WAIT/APDU exitoso; false tras RELEASE o un fallo de
 // transmisión. Ver nota en el handler de WAIT sobre por qué APDU: no puede
 // re-consultar nfc.isTagDetected() directamente.
 static bool gPassthroughActive = false;
 
-// IDENTIFY (contrato de descubrimiento BomberCatControl §6.2): parpadeo de LED
-// ASÍNCRONO — la respuesta `+OK` sale al instante y el LED se bombea desde
-// loop() (identifyPump), sin bloquear jamás el plano de control (§6.2.1).
-static bool gIdentifyActive = false;
-static unsigned long gIdentifyUntil = 0;
-static unsigned long gIdentifyLastToggle = 0;
-static bool gIdentifyLedOn = false;
+// Estado del plano de control (reportado por `info`/:state): true mientras se
+// espera una tarjeta/tag (WAIT/SCAN/CARDSCAN/TAG). "emulating" se deriva de
+// gEmuActive (ver más abajo); controlState() combina ambas señales.
+static bool gScanningCard = false;
 
 // Emulación NDEF (comando EMU:): el BomberCat se hace pasar por un tag NFC
 // Forum Type 4 sirviendo un mensaje NDEF arbitrario (posiblemente malformado,
@@ -2789,26 +2795,13 @@ void emvyTagsRead();
 void emvyMagInit();
 void emvyMagPlay(const char *track1, const char *track2);
 
-// Bombea el parpadeo del LED de IDENTIFY (contrato §6.2): asíncrono, se llama
-// desde loop(); apaga el LED al vencer la ventana. No bloquea nada.
-static void identifyPump() {
-  unsigned long now = millis();
-  if ((long)(now - gIdentifyUntil) >= 0) {
-    gIdentifyActive = false;
-    gIdentifyLedOn = false;
-#ifdef LED_BUILTIN
-    digitalWrite(LED_BUILTIN, LOW);
-#endif
-    return;
-  }
-  if (now - gIdentifyLastToggle >= 150) {
-    gIdentifyLastToggle = now;
-    gIdentifyLedOn = !gIdentifyLedOn;
-#ifdef LED_BUILTIN
-    digitalWrite(LED_BUILTIN, gIdentifyLedOn ? HIGH : LOW);
-#endif
-  }
-}
+// BomberCatControl::Callbacks hooks (ver EMVyBomberCat.ino más abajo para la
+// implementación): controlState() reporta el estado del plano de control para
+// `info`; emvyCommand() atiende los verbos operativos que el REPL base no
+// reconoce (identify/ping/info los sirve BomberCatControl directamente — el
+// parpadeo de IDENTIFY también lo maneja core, mismo timing que antes).
+const char *controlState();
+bool emvyCommand(const char *verb, char *args);
 
 void setup() {
   Serial.begin(115200);
@@ -2839,6 +2832,24 @@ void setup() {
   emvyMagInit();
   Serial.println("# EMVyBomberCat listo — navaja suiza: EMV/APDU/TAGS/MAG");
   Serial.println("# Acerca la tarjeta contactless...");
+
+  BomberCatControl::Callbacks cb;
+  cb.state = controlState;
+  cb.command = emvyCommand;
+  control.setCallbacks(cb);
+  control.begin(); // anuncia listo al host CLI (+OK bombercat ready)
+}
+
+// Estado del plano de control (reportado por `info`/:state): "emulating"
+// mientras hay una emulación NDEF/EMV en curso (gEmuActive), "scanning"
+// mientras se espera una tarjeta/tag (WAIT/SCAN/CARDSCAN/TAG), "idle" en
+// cualquier otro momento.
+const char *controlState() {
+  if (gEmuActive)
+    return "emulating";
+  if (gScanningCard)
+    return "scanning";
+  return "idle";
 }
 
 // ---------------------------------------------------------------------------
@@ -3557,56 +3568,28 @@ static void emuPump() {
 }
 
 // ---------------------------------------------------------------------------
-// Manejar comando serial: "SCAN <centavos>\n"
+// BomberCatControl::Callbacks::command hook — ping/info/identify ya los sirve
+// BomberCatControl (core), case-insensitive; este hook solo atiende el
+// dialecto operativo histórico (WAIT/APDU:/EMU:/EMUEMV/MAG:/TAG/CARDSCAN/
+// REBOOT/STOP/RELEASE/NFCINFO/SCAN), sin cambios de comportamiento respecto a
+// la versión previa. `verb`/`args` llegan ya separados por el primer espacio
+// (BomberCatControl.h); se reconstruyen en una sola línea para reutilizar el
+// parseo original basado en offsets fijos (p.ej. c.substring(4) para "MAG:")
+// y para no partir payloads con espacios embebidos (p.ej. un track1 con un
+// espacio en el nombre del titular). Un verbo no reconocido retorna false: el
+// propio BomberCatControl emite "-ERR unknown command <verb>" (§6.3.3/C-11).
 // ---------------------------------------------------------------------------
-static void handleSerialCmd(const String &cmd) {
-  String c = cmd;
+bool emvyCommand(const char *verb, char *args) {
+  String c(verb);
+  if (args != nullptr && args[0] != '\0') {
+    c += ' ';
+    c += args;
+  }
   c.trim();
   if (c.length() == 0)
-    return;
+    return false;
   String up = c;
   up.toUpperCase();
-
-  // -------------------------------------------------------------------------
-  // Plano de control — BomberCatControl Discovery Contract v1.0
-  //   ping/info/identify son los comandos de DESCUBRIMIENTO que TODO firmware
-  //   BomberCat DEBE implementar para que cualquier host conforme (CLI vendor,
-  //   GUI/TUI de EMVy) lo descubra e identifique de forma idéntica. El verbo se
-  //   compara sobre `up` (mayúsculas) => es case-insensitive (§5.1: ping/PING/
-  //   Ping producen la MISMA respuesta). El resto de verbos operativos
-  //   (WAIT/APDU:/RESP:/EMU:/…) conservan el dialecto histórico por
-  //   retrocompatibilidad con `emvy/readers/bombercat.py` (ver README
-  //   §Contrato).
-  // -------------------------------------------------------------------------
-  // ping (§5): handshake de descubrimiento. Respuesta: `+OK bombercat` (el host
-  // valida `ok AND "bombercat" in message`). Sin data lines, un solo
-  // terminador.
-  if (up == "PING") {
-    Serial.println("+OK bombercat");
-    return;
-  }
-
-  // info (§6.1): snapshot legible por máquina. `fw_name` es el slug estable de
-  // esta imagen — deja que el host la identifique sin adivinar por el banner.
-  // Read-only: no cambia estado.
-  if (up == "INFO") {
-    Serial.println(":fw_name emvybombercat");
-    Serial.println(":fw " BOMBERCAT_FW_VERSION);
-    Serial.println(":role emv-multitool");
-    Serial.println("+OK");
-    return;
-  }
-
-  // identify (§6.2): permite distinguir físicamente una placa entre varias.
-  // Devuelve el terminador de INMEDIATO; el parpadeo (~2 s) corre asíncrono en
-  // loop() y NUNCA bloquea el plano de control. Idempotente, no destructivo.
-  if (up == "IDENTIFY") {
-    gIdentifyActive = true;
-    gIdentifyUntil = millis() + 2000;
-    gIdentifyLastToggle = 0;
-    Serial.println("+OK");
-    return;
-  }
 
   // REBOOT / RESET — reinicio completo del MCU (RP2040). Útil desde la GUI/TUI
   // para salir de un estado atascado (p.ej. emulación colgada) sin desconectar
@@ -3616,7 +3599,7 @@ static void handleSerialCmd(const String &cmd) {
     Serial.flush();
     delay(80);
     NVIC_SystemReset(); // no retorna
-    return;
+    return true;
   }
 
   // STOP — detiene la emulación NDEF en curso (si la hay) en cualquier momento.
@@ -3625,7 +3608,7 @@ static void handleSerialCmd(const String &cmd) {
       emuStop("stop");
     else
       Serial.println("OK");
-    return;
+    return true;
   }
 
   // Si estamos emulando y llega un comando que necesita el modo lector, detener
@@ -3644,7 +3627,7 @@ static void handleSerialCmd(const String &cmd) {
     uint8_t err = nfc.connectNCI();
     if (err) {
       Serial.println("NFCINFO: ERR connectNCI (chip no responde)");
-      return;
+      return true;
     }
     char b[48];
     snprintf(b, sizeof(b), "NFCINFO: fwver=%d (chip vivo)",
@@ -3654,7 +3637,7 @@ static void handleSerialCmd(const String &cmd) {
     nfc.configMode();
     nfc.startDiscovery();
     Serial.println("NFCINFO: discovery re-armado");
-    return;
+    return true;
   }
 
   // -------------------------------------------------------------------------
@@ -3663,8 +3646,10 @@ static void handleSerialCmd(const String &cmd) {
   //   MAG:<track1>|<track2>   -> emula un swipe de banda (magspoof); OK
   // -------------------------------------------------------------------------
   if (up == "TAG" || up == "TAGS") {
+    gScanningCard = true;
     emvyTagsRead();
-    return;
+    gScanningCard = false;
+    return true;
   }
 
   if (up.startsWith("MAG:")) {
@@ -3674,7 +3659,7 @@ static void handleSerialCmd(const String &cmd) {
     String t2 = (bar >= 0) ? rest.substring(bar + 1) : String("");
     emvyMagPlay(t1.c_str(), t2.c_str());
     Serial.println("OK");
-    return;
+    return true;
   }
 
   if (up.startsWith("WAIT")) {
@@ -3692,6 +3677,7 @@ static void handleSerialCmd(const String &cmd) {
     // la carrera de "reset justo antes de la única lectura corta").
     // No usa waitForTagRemoval() (a diferencia de RELEASE): aquí SÍ queremos
     // detectar de inmediato una tarjeta que ya esté puesta.
+    gScanningCard = true;
     nfc.reset();
     unsigned long lastRearm = millis();
     bool found = false;
@@ -3711,6 +3697,7 @@ static void handleSerialCmd(const String &cmd) {
       }
       delay(40);
     }
+    gScanningCard = false;
     // isTagDetected() es de FLANCO (avisa una vez por notificación NCI), no
     // de nivel: si aquí volviéramos a llamarlo desde APDU: casi siempre daría
     // false aunque la tarjeta siga presente, porque el aviso ya se consumió.
@@ -3719,7 +3706,7 @@ static void handleSerialCmd(const String &cmd) {
     // runEmvFlowOnce, que jamás vuelve a llamar isTagDetected() entre APDUs).
     gPassthroughActive = found;
     Serial.println(found ? "READY:" : "ERR:NOCARD");
-    return;
+    return true;
   }
 
   if (up.startsWith("APDU:")) {
@@ -3729,11 +3716,11 @@ static void handleSerialCmd(const String &cmd) {
     int alen = hexDecode(hx.c_str(), apdu, sizeof(apdu));
     if (alen < 4) {
       Serial.println("ERR:BADAPDU");
-      return;
+      return true;
     }
     if (!gPassthroughActive) {
       Serial.println("ERR:NOCARD");
-      return;
+      return true;
     }
     uint8_t resp[264];
     uint8_t rlen = 0;
@@ -3741,27 +3728,27 @@ static void handleSerialCmd(const String &cmd) {
       gPassthroughActive =
           false; // fallo de transmisión: se asume tarjeta retirada
       Serial.println("ERR:TXFAIL");
-      return;
+      return true;
     }
     drainNciFragments(resp, rlen);
     char out[600];
     hexEncode(resp, rlen, out);
     Serial.print("RESP:");
     Serial.println(out);
-    return;
+    return true;
   }
 
   if (up == "RELEASE") {
     if (gEmuActive) {
       emuStop("release");
-      return;
+      return true;
     }
     gPassthroughActive = false;
     nfc.waitForTagRemoval();
     nfc.stopDiscovery();
     nfc.startDiscovery();
     Serial.println("OK");
-    return;
+    return true;
   }
 
   // -------------------------------------------------------------------------
@@ -3780,16 +3767,19 @@ static void handleSerialCmd(const String &cmd) {
     if (gEmuActive)
       emuStop("preempt");
     Serial.println("# CARDSCAN: acerca la tarjeta contactless a leer...");
-    if (!pollCard(20000)) {
+    gScanningCard = true;
+    bool found = pollCard(20000);
+    gScanningCard = false;
+    if (!found) {
       Serial.println("ERR:NOCARD");
       releaseCard();
-      return;
+      return true;
     }
     memset(&card, 0, sizeof(card));
     if (!runEmvFlow(50)) {
       Serial.println("ERR:SCANFAIL");
       releaseCard();
-      return;
+      return true;
     }
     storeScannedCard();
     // Reporta los campos COMPLETOS (incluido el track2 hex) para que el editor
@@ -3803,7 +3793,7 @@ static void handleSerialCmd(const String &cmd) {
     Serial.print(" t2=");
     Serial.println(card.track2);
     releaseCard();
-    return;
+    return true;
   }
 
   // EMUEMV[:<aid>|<pan>|<exp>|<track2>|RAM] — emula una TARJETA EMV para
@@ -3831,7 +3821,7 @@ static void handleSerialCmd(const String &cmd) {
       gCardCustom = false; // EMUEMV a secas = tarjeta de prueba canned
     }
     emuStart(1);
-    return;
+    return true;
   }
 
   if (up.startsWith("EMU:")) {
@@ -3841,7 +3831,7 @@ static void handleSerialCmd(const String &cmd) {
     if (gEmuLen < 0)
       gEmuLen = 0; // mensaje vacío es válido (tag vacío)
     emuStart(0);
-    return;
+    return true;
   }
 
   // -------------------------------------------------------------------------
@@ -3849,14 +3839,7 @@ static void handleSerialCmd(const String &cmd) {
   // previo)
   // -------------------------------------------------------------------------
   if (!up.startsWith("SCAN")) {
-    // Contrato §6.3.3 / C-11: un verbo desconocido DEBE responder
-    // `-ERR unknown command <verb>` — nunca quedarse en silencio (obligaría al
-    // host a agotar su deadline) ni emitir un `+OK` pelado.
-    int sp0 = c.indexOf(' ');
-    String verb = (sp0 >= 0) ? c.substring(0, sp0) : c;
-    Serial.print("-ERR unknown command ");
-    Serial.println(verb);
-    return;
+    return false; // verbo no reconocido -> BomberCatControl emite -ERR
   }
 
   int sp = up.indexOf(' ');
@@ -3865,6 +3848,7 @@ static void handleSerialCmd(const String &cmd) {
   SLOGF("# CMD serial: SCAN %lu centavos", (unsigned long)amt);
   Serial.println("# Esperando tarjeta ISO-DEP...");
 
+  gScanningCard = true;
   bool tagFound = false;
   unsigned long tw = millis();
   while (millis() - tw < 30000) {
@@ -3883,9 +3867,10 @@ static void handleSerialCmd(const String &cmd) {
     }
     delay(50);
   }
+  gScanningCard = false;
   if (!tagFound) {
     Serial.println("# ERROR: Timeout — sin tarjeta en 30s");
-    return;
+    return true;
   }
   if (runEmvFlow(amt)) {
     buildWebJson(amt);
@@ -3902,30 +3887,23 @@ static void handleSerialCmd(const String &cmd) {
     nfc.stopDiscovery();
     nfc.startDiscovery();
   }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
 // Loop
 // ---------------------------------------------------------------------------
 void loop() {
+  control.poll(); // servicio del plano de control (ping/info/identify/…)
+
   WiFiClient client = server.available();
   if (client) {
     handleClient(client);
     client.stop();
   }
 
-  if (Serial.available()) {
-    String cmd = Serial.readStringUntil('\n');
-    handleSerialCmd(cmd);
-  }
-
   // Emulación NDEF observable: se bombea aquí para que sea cancelable (STOP/
   // REBOOT se leen entre pumps) y no un bloqueo de 30 s.
   if (gEmuActive)
     emuPump();
-
-  // Parpadeo asíncrono de IDENTIFY (contrato §6.2): no bloquea el plano de
-  // control.
-  if (gIdentifyActive)
-    identifyPump();
 }

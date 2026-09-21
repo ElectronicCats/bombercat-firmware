@@ -8,7 +8,7 @@ todo manejable por **serie** desde EMVyController.
 
 | Comando serie              | Modo   | Qué hace                                              |
 |----------------------------|--------|------------------------------------------------------|
-| `ping` / `info` / `identify` | control | Descubrimiento (Discovery Contract) → `+OK bombercat` / `:fw_name…+OK` / `+OK`+LED |
+| `ping` / `info` / `identify` | control | Descubrimiento (`BomberCatControl`, core) → `+OK bombercat` / `:fw_name…+OK` / `+OK`+LED |
 | `SCAN <centavos>`          | EMV    | Flujo EMV contactless → `JSON_START/…/JSON_END`      |
 | `WAIT [ms]`                | APDU   | Espera tarjeta ISO-DEP (`READY:` / `ERR:NOCARD`)     |
 | `APDU:<hex>` / `RELEASE`   | APDU   | Passthrough de APDU (`RESP:<hex+SW>`)                |
@@ -61,31 +61,36 @@ Todos aceptan `--port /dev/ttyACMx` para fijar el puerto si hay más de un dispo
 
 ## Discovery Contract (plano de control conforme)
 
-Este firmware implementa el **BomberCatControl Discovery Contract v1.0**
-(`docs/BomberCatControl-Discovery-Contract.md`, normativo) en su **plano de control**,
-para que cualquier host conforme —el CLI de `bombercat-tools`, la GUI y la TUI de EMVy—
-lo descubra e identifique de forma **idéntica**:
+Desde la **Fase 2** de la integración con `core/`, el plano de control (`ping`/`info`/
+`identify`/verbo-desconocido) ya no lo implementa este sketch: lo sirve
+`core/src/BomberCatControl` (el mismo REPL de `MifareClassic`/`DetectTags`/…), para que
+cualquier host conforme —el CLI de `bombercat-tools`, la GUI y la TUI de EMVy— descubra e
+identifique la placa de forma **idéntica** al resto del monorepo:
 
 | Estímulo (host→device) | Respuesta (device→host)                    | Cláusula |
 |------------------------|--------------------------------------------|----------|
 | `ping` (o `PING`/`Ping`) | `+OK bombercat`  (sin data lines)        | §5, C-6/C-7 |
-| `info`                 | `:fw_name emvybombercat` · `:fw <v>` · `:role emv-multitool` · `+OK` | §6.1, C-8 |
+| `info`                 | `:fw` · `:fw_name emvybombercat` · `:state <idle\|scanning\|emulating>` · `+OK` | §6.1, C-8 |
 | `identify`             | `+OK` inmediato + parpadeo de LED asíncrono (~2 s) | §6.2, C-9 |
 | `<verbo desconocido>`  | `-ERR unknown command <verb>`              | §6.3.3, C-11 |
 
-- El verbo es **case-insensitive** (el dispatcher compara en mayúsculas), así que
-  `ping`/`PING`/`Ping` producen la misma respuesta (§5.1) — esto reconcilia el `PING`
-  (mayúsculas) del reader de EMVy con el `ping` (minúsculas) del CLI del vendor.
+- El verbo es **case-insensitive** (`BomberCatControl::dispatch` lo compara ignorando
+  mayúsculas), así que `ping`/`PING`/`Ping` producen la misma respuesta (§5.1) — esto
+  reconcilia el `PING` (mayúsculas) del reader de EMVy con el `ping` (minúsculas) del CLI
+  del vendor. Es un fix en `core/`, no algo específico de este sketch.
 - El parpadeo de `identify` **no bloquea** el plano de control: la respuesta `+OK` sale
-  al instante y el LED se bombea desde `loop()` (`identifyPump`, §6.2.1).
+  al instante y el LED (`LED_BUILTIN`, ~2 s / toggle cada 150 ms) lo bombea `core` desde
+  `control.poll()` (§6.2.1) — EMVy no necesita un `identifyPump()` propio.
+- `:state` reemplaza al antiguo `:role emv-multitool` (divergencia ya corregida).
 
 **Desviación conocida (transitoria).** Los verbos **operativos** (`WAIT`/`APDU:`→`RESP:`,
 `SCAN`→`JSON_*`, `EMU:`/`EMUEMV`→`EMU:*`, `MAG:`/`RELEASE`/`STOP`→`OK`) conservan el
 **dialecto histórico** en vez del framing `+OK`/`-ERR` del contrato (§2.7/§3), por
-retrocompatibilidad con `emvy/readers/bombercat.py`, que aún habla ese dialecto. Migrarlos
-al framing del contrato es **Fase 2** y depende de que el host se actualice primero (PR en
-curso). El descubrimiento (ping/info/identify/verbo-desconocido) —lo que hace que la placa
-aparezca con ✓ en `device list`— ya es conforme.
+retrocompatibilidad con `emvy/readers/bombercat.py`, que aún habla ese dialecto — los
+atiende el hook `emvyCommand()` (`BomberCatControl::Callbacks::command`). Migrarlos al
+framing del contrato depende de que el host se actualice primero y queda pendiente de
+decisión de equipo. El descubrimiento (ping/info/identify/verbo-desconocido) —lo que hace
+que la placa aparezca con ✓ en `device list`— ya es conforme.
 
 ## Estructura (sketch multi-archivo — Arduino concatena los .ino)
 
