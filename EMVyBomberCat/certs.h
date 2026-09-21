@@ -9,11 +9,11 @@
 // Certificado autofirmado EC P-256 para 192.168.4.1
 // (reemplazar con salida de generate_cert.py)
 static const char SERVER_CERT_PEM[] =
-  "-----BEGIN CERTIFICATE-----\n"
-  "REEMPLAZAR_CON_SALIDA_DE_generate_cert.py\n"
-  "-----END CERTIFICATE-----\n";
+    "-----BEGIN CERTIFICATE-----\n"
+    "REEMPLAZAR_CON_SALIDA_DE_generate_cert.py\n"
+    "-----END CERTIFICATE-----\n";
 
 static const char SERVER_KEY_PEM[] =
-  "-----BEGIN EC PRIVATE KEY-----\n"
-  "REEMPLAZAR_CON_SALIDA_DE_generate_cert.py\n"
-  "-----END EC PRIVATE KEY-----\n";
+    "-----BEGIN EC PRIVATE KEY-----\n"
+    "REEMPLAZAR_CON_SALIDA_DE_generate_cert.py\n"
+    "-----END EC PRIVATE KEY-----\n";
