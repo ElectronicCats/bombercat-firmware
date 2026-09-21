@@ -898,6 +898,7 @@ static bool pollCard(unsigned long timeoutMs = 20000) {
       lastSec = sec;
       SLOGF("Esperando tarjeta... %ds/%ds", sec, (int)(timeoutMs / 1000));
     }
+    control.poll(); // atiende ping/info/identify durante la espera
     delay(100);
   }
   return false;
@@ -1603,6 +1604,7 @@ static void handleTest(WiFiClient &client, const String &id) {
         found = true;
         break;
       }
+      control.poll(); // atiende ping/info/identify durante la espera
       delay(100);
     }
     if (!found) {
@@ -1636,6 +1638,7 @@ static void handleTest(WiFiClient &client, const String &id) {
         isISO = (nfc.remoteDevice.getProtocol() == nfc.protocol.ISODEP);
         break;
       }
+      control.poll(); // atiende ping/info/identify durante la espera
       delay(100);
     }
     if (!found) {
@@ -2169,6 +2172,7 @@ static void handleTest(WiFiClient &client, const String &id) {
             ref = true;
             break;
           }
+          control.poll(); // atiende ping/info/identify durante la espera
           delay(100);
         }
         if (!ref) {
@@ -3695,6 +3699,7 @@ bool emvyCommand(const char *verb, char *args) {
         nfc.reset();
         lastRearm = millis();
       }
+      control.poll(); // atiende ping/info/identify durante la espera
       delay(40);
     }
     gScanningCard = false;
@@ -3857,9 +3862,9 @@ bool emvyCommand(const char *verb, char *args) {
       tagFound = true;
       break;
     }
-    // Drenar serial y atender WiFi para que el USB CDC no pierda conexión
-    while (Serial.available())
-      Serial.read();
+    // Atender el plano de control (ping/info/identify) y WiFi para que el
+    // USB CDC no pierda conexión ni el host vea la placa colgada.
+    control.poll();
     WiFiClient wc = server.available();
     if (wc) {
       handleClient(wc);
