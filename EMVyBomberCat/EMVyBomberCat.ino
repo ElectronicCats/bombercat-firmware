@@ -46,6 +46,7 @@
 #include <ArduinoJson.h>
 #include <BomberCatControl.h>
 #include <Electroniccats_PN7150.h>
+#include <EmvKernel.h>
 #include <HexUtils.h>
 #include <MagStripe.h>
 #include <NfcController.h>
@@ -127,21 +128,13 @@ static int gEmuMode = 0; // struct DolItem vive en emv_emu.h
 // ---------------------------------------------------------------------------
 // Parámetros de terminal (México, attended online POS)
 // ---------------------------------------------------------------------------
-static const uint8_t TERM_COUNTRY[2] = {0x04, 0x84};
-static const uint8_t TERM_CURRENCY[2] = {0x04, 0x84};
-static const uint8_t TERM_TYPE = 0x22;
-static const uint8_t TERM_TVR[5] = {0x00, 0x00, 0x00, 0x00, 0x00};
-static const uint8_t TXN_TYPE = 0x00;
-// TTQ byte1: 0x26 = 0010 0110 =
-// ODA(no)|ODA-off(no)|Online-req(YES)|CVM-not-req|Issuer-upd|CDCVM Kiosk sin
-// CVM: bit5=0 evita que el emisor rechace por "CVM required but not performed"
-static const uint8_t TERM_TTQ[4] = {0x26, 0x00, 0x00, 0x00};
-// CVM Results enviados al chip en CDOL1 tag 9F34: 1F=NoCVM-required 00=always
-// 02=successful
-static const uint8_t CVM_RESULTS[3] = {0x1F, 0x00, 0x02};
-// Fecha YYMMDD enviada en tag 9A del CDOL — debe coincidir con
-// buildWebJson/txn_date
-static const char TXN_DATE[7] = "260612";
+// Perfil de terminal (país/divisa/tipo/TVR/TTQ/CVM/fecha) — fuente única en
+// core/src/EmvKernel (TerminalProfile). Antes eran 8 constantes sueltas aquí
+// (TERM_COUNTRY/CURRENCY/TYPE/TVR, TXN_TYPE, TERM_TTQ, CVM_RESULTS, TXN_DATE);
+// el kernel EMV (buildDolData) y buildWebJson las leen ahora vía este objeto.
+// Valores idénticos a los originales: México, POS atendido online.
+static const EmvKernel::TerminalProfile TERM =
+    EmvKernel::TerminalProfile::mexicoOnlinePos();
 
 // ---------------------------------------------------------------------------
 // Tabla de AIDs conocidas — selección prioritaria
@@ -295,63 +288,9 @@ static uint32_t hwRand32() {
 // Hex encode/decode ahora viven en core/src/HexUtils (HexUtils::toCompact /
 // HexUtils::decode) — antes reimplementados aquí como hexEncode()/hexDecode().
 
-static void encodeAmount(uint64_t cents, uint8_t *out6) {
-  for (int i = 5; i >= 0; i--) {
-    out6[i] = (uint8_t)(cents & 0xFF);
-    cents >>= 8;
-  }
-}
-
-static uint8_t *tlvFind(uint8_t *buf, int bufLen, uint16_t tag, int *outLen) {
-  int i = 0;
-  while (i < bufLen - 1) {
-    uint16_t t;
-    int tagBytes;
-    if ((buf[i] & 0x1F) == 0x1F) {
-      if (i + 1 >= bufLen)
-        break;
-      t = ((uint16_t)buf[i] << 8) | buf[i + 1];
-      tagBytes = 2;
-    } else {
-      t = buf[i];
-      tagBytes = 1;
-    }
-    bool constr = (buf[i] & 0x20) != 0;
-    i += tagBytes;
-    if (i >= bufLen)
-      break;
-    int vlen;
-    if (buf[i] & 0x80) {
-      int nb = buf[i] & 0x7F;
-      if (nb > 2 || i + nb >= bufLen)
-        break;
-      vlen = 0;
-      for (int j = 0; j < nb; j++)
-        vlen = (vlen << 8) | buf[i + 1 + j];
-      i += 1 + nb;
-    } else {
-      vlen = buf[i++];
-    }
-    if (i + vlen > bufLen)
-      break;
-    if (t == tag) {
-      if (outLen)
-        *outLen = vlen;
-      return buf + i;
-    }
-    if (constr) {
-      int cl = 0;
-      uint8_t *f = tlvFind(buf + i, vlen, tag, &cl);
-      if (f) {
-        if (outLen)
-          *outLen = cl;
-        return f;
-      }
-    }
-    i += vlen;
-  }
-  return NULL;
-}
+// encodeAmount / tlvFind ahora viven en core/src/EmvKernel (EmvKernel::
+// encodeAmount / EmvKernel::tlvFind) — antes definidos aquí. buildDolData
+// también se movió al kernel (ver más abajo, GET PROCESSING OPTIONS).
 
 static void drainNciFragments(uint8_t *resp, uint8_t &respLen) {
   for (int frag = 0; frag < 16 && respLen < 252; frag++) {
@@ -438,83 +377,10 @@ static bool apduExchange(uint8_t *cmd, uint8_t cmdLen, uint8_t *resp,
   return false;
 }
 
-static void buildDolData(uint8_t *dol, int dolLen, uint8_t *out,
-                         uint8_t &outLen, uint64_t amountCents) {
-  outLen = 0;
-  uint8_t amtBytes[6];
-  encodeAmount(amountCents, amtBytes);
-  int i = 0;
-  while (i < dolLen && outLen < 62) {
-    uint16_t tag;
-    int tb;
-    if ((dol[i] & 0x1F) == 0x1F) {
-      tag = ((uint16_t)dol[i] << 8) | dol[i + 1];
-      tb = 2;
-    } else {
-      tag = dol[i];
-      tb = 1;
-    }
-    i += tb;
-    uint8_t len = dol[i++];
-    switch (tag) {
-    case 0x9F02:
-      memcpy(out + outLen, amtBytes, 6);
-      outLen += 6;
-      break;
-    case 0x9F03:
-      for (int j = 0; j < len; j++)
-        out[outLen++] = 0;
-      break;
-    case 0x9F1A:
-      out[outLen++] = TERM_COUNTRY[0];
-      out[outLen++] = TERM_COUNTRY[1];
-      break;
-    case 0x95:
-      for (int j = 0; j < 5; j++)
-        out[outLen++] = TERM_TVR[j];
-      break;
-    case 0x5F2A:
-      out[outLen++] = TERM_CURRENCY[0];
-      out[outLen++] = TERM_CURRENCY[1];
-      break;
-    case 0x9A:
-      out[outLen++] =
-          (uint8_t)(((TXN_DATE[0] - '0') << 4) | (TXN_DATE[1] - '0'));
-      out[outLen++] =
-          (uint8_t)(((TXN_DATE[2] - '0') << 4) | (TXN_DATE[3] - '0'));
-      out[outLen++] =
-          (uint8_t)(((TXN_DATE[4] - '0') << 4) | (TXN_DATE[5] - '0'));
-      break;
-    case 0x9C:
-      out[outLen++] = TXN_TYPE;
-      break;
-    case 0x9F37:
-      memcpy(out + outLen, card.un, 4);
-      outLen += 4;
-      break;
-    case 0x9F34:
-      memcpy(out + outLen, CVM_RESULTS, 3);
-      outLen += 3;
-      break;
-    case 0x9F35:
-      out[outLen++] = TERM_TYPE;
-      break;
-    case 0x9F66: {
-      bool isVisa = (strncmp(card.aidHex, "A00000000310", 12) == 0);
-      if (isVisa)
-        memcpy(out + outLen, TERM_TTQ, 4);
-      else
-        memset(out + outLen, 0, 4);
-      outLen += 4;
-      break;
-    }
-    default:
-      for (int j = 0; j < len; j++)
-        out[outLen++] = 0;
-      break;
-    }
-  }
-}
+// buildDolData se movió a core/src/EmvKernel (EmvKernel::buildDolData). El
+// perfil de terminal (TERM), el UN de la tarjeta (card.un) y el flag isVisa se
+// pasan ahora como argumentos; ver los call sites en GET PROCESSING OPTIONS y
+// GENERATE AC.
 
 // ---------------------------------------------------------------------------
 // EMV steps
@@ -543,9 +409,12 @@ static bool getProcessingOptions(uint8_t *fci, uint8_t fciLen, uint8_t *resp,
   uint8_t dolData[64];
   uint8_t dolLen = 0;
   int pdolLen = 0;
-  uint8_t *pdol = tlvFind(fci, fciLen - 2, 0x9F38, &pdolLen);
-  if (pdol && pdolLen > 0)
-    buildDolData(pdol, pdolLen, dolData, dolLen, amountCents);
+  uint8_t *pdol = EmvKernel::tlvFind(fci, fciLen - 2, 0x9F38, &pdolLen);
+  if (pdol && pdolLen > 0) {
+    bool isVisa = (strncmp(card.aidHex, "A00000000310", 12) == 0);
+    EmvKernel::buildDolData(pdol, pdolLen, dolData, dolLen, amountCents, TERM,
+                            card.un, isVisa);
+  }
   uint8_t cmd[72];
   cmd[0] = 0x80;
   cmd[1] = 0xA8;
@@ -571,27 +440,32 @@ static bool generateAC(uint64_t amountCents, uint8_t *resp, uint8_t &len,
   uint8_t cd[64];
   uint8_t cdLen = 0;
   if (card.cdol1Len > 0) {
-    buildDolData(card.cdol1, card.cdol1Len, cd, cdLen, amountCents);
+    bool isVisa = (strncmp(card.aidHex, "A00000000310", 12) == 0);
+    EmvKernel::buildDolData(card.cdol1, card.cdol1Len, cd, cdLen, amountCents,
+                            TERM, card.un, isVisa);
   } else {
     uint8_t amtB[6];
-    encodeAmount(amountCents, amtB);
+    EmvKernel::encodeAmount(amountCents, amtB);
     memcpy(cd + cdLen, amtB, 6);
     cdLen += 6;
     for (int j = 0; j < 6; j++)
       cd[cdLen++] = 0;
-    cd[cdLen++] = TERM_COUNTRY[0];
-    cd[cdLen++] = TERM_COUNTRY[1];
+    cd[cdLen++] = TERM.country[0];
+    cd[cdLen++] = TERM.country[1];
     for (int j = 0; j < 5; j++)
-      cd[cdLen++] = TERM_TVR[j];
-    cd[cdLen++] = TERM_CURRENCY[0];
-    cd[cdLen++] = TERM_CURRENCY[1];
-    cd[cdLen++] = (uint8_t)(((TXN_DATE[0] - '0') << 4) | (TXN_DATE[1] - '0'));
-    cd[cdLen++] = (uint8_t)(((TXN_DATE[2] - '0') << 4) | (TXN_DATE[3] - '0'));
-    cd[cdLen++] = (uint8_t)(((TXN_DATE[4] - '0') << 4) | (TXN_DATE[5] - '0'));
-    cd[cdLen++] = TXN_TYPE;
+      cd[cdLen++] = TERM.tvr[j];
+    cd[cdLen++] = TERM.currency[0];
+    cd[cdLen++] = TERM.currency[1];
+    cd[cdLen++] =
+        (uint8_t)(((TERM.txnDate[0] - '0') << 4) | (TERM.txnDate[1] - '0'));
+    cd[cdLen++] =
+        (uint8_t)(((TERM.txnDate[2] - '0') << 4) | (TERM.txnDate[3] - '0'));
+    cd[cdLen++] =
+        (uint8_t)(((TERM.txnDate[4] - '0') << 4) | (TERM.txnDate[5] - '0'));
+    cd[cdLen++] = TERM.txnType;
     memcpy(cd + cdLen, card.un, 4);
     cdLen += 4;
-    cd[cdLen++] = TERM_TYPE;
+    cd[cdLen++] = TERM.type;
   }
   uint8_t cmd[72];
   cmd[0] = 0x80;
@@ -611,13 +485,13 @@ static bool parseGenerateAC(uint8_t *resp, uint8_t respLen) {
     return false;
   if (data[0] == 0x77) {
     int tLen = 0;
-    uint8_t *inner = tlvFind(data, dLen, 0x77, &tLen);
+    uint8_t *inner = EmvKernel::tlvFind(data, dLen, 0x77, &tLen);
     if (!inner)
       return false;
     int al = 0, atl = 0, il = 0;
-    uint8_t *ap = tlvFind(inner, tLen, 0x9F26, &al);
-    uint8_t *atp = tlvFind(inner, tLen, 0x9F36, &atl);
-    uint8_t *ip = tlvFind(inner, tLen, 0x9F10, &il);
+    uint8_t *ap = EmvKernel::tlvFind(inner, tLen, 0x9F26, &al);
+    uint8_t *atp = EmvKernel::tlvFind(inner, tLen, 0x9F36, &atl);
+    uint8_t *ip = EmvKernel::tlvFind(inner, tLen, 0x9F10, &il);
     if (!ap || al < 8)
       return false;
     memcpy(card.arqc, ap, 8);
@@ -683,7 +557,7 @@ static bool runEmvFlowOnce(uint64_t amountCents) {
   uint8_t ppseAidLen = 0;
   {
     int al = 0;
-    uint8_t *ap = tlvFind(resp, respLen - 2, 0x4F, &al);
+    uint8_t *ap = EmvKernel::tlvFind(resp, respLen - 2, 0x4F, &al);
     if (ap && al >= 5 && al <= 16) {
       ppseAidLen = (uint8_t)al;
       memcpy(ppseAid, ap, al);
@@ -714,8 +588,8 @@ static bool runEmvFlowOnce(uint64_t amountCents) {
     return false;
 
   int aipL = 0, aflL = 0;
-  uint8_t *aipP = tlvFind(gpo, gpoLen - 2, 0x82, &aipL);
-  uint8_t *aflP = tlvFind(gpo, gpoLen - 2, 0x94, &aflL);
+  uint8_t *aipP = EmvKernel::tlvFind(gpo, gpoLen - 2, 0x82, &aipL);
+  uint8_t *aflP = EmvKernel::tlvFind(gpo, gpoLen - 2, 0x94, &aflL);
   if (!aipP && gpoLen >= 6 && gpo[0] == 0x80) {
     aipP = gpo + 2;
     aipL = 2;
@@ -730,7 +604,7 @@ static bool runEmvFlowOnce(uint64_t amountCents) {
     if (gdl <= 0)
       return;
     int t57l = 0;
-    uint8_t *t57 = tlvFind(gd, gdl, 0x57, &t57l);
+    uint8_t *t57 = EmvKernel::tlvFind(gd, gdl, 0x57, &t57l);
     if (t57 && t57l > 0) {
       HexUtils::toCompact(t57, t57l, card.track2);
       char *sep = strchr(card.track2, 'D');
@@ -747,7 +621,7 @@ static bool runEmvFlowOnce(uint64_t amountCents) {
     }
     if (!gotPAN) {
       int ppl = 0;
-      uint8_t *pp = tlvFind(gd, gdl, 0x5A, &ppl);
+      uint8_t *pp = EmvKernel::tlvFind(gd, gdl, 0x5A, &ppl);
       if (pp) {
         HexUtils::toCompact(pp, ppl, card.pan);
         int l = strlen(card.pan);
@@ -758,7 +632,7 @@ static bool runEmvFlowOnce(uint64_t amountCents) {
     }
     if (card.expiry[0] == '\0') {
       int el = 0;
-      uint8_t *ep = tlvFind(gd, gdl, 0x5F24, &el);
+      uint8_t *ep = EmvKernel::tlvFind(gd, gdl, 0x5F24, &el);
       if (ep && el >= 3) {
         char t[8];
         HexUtils::toCompact(ep, 3, t);
@@ -768,7 +642,7 @@ static bool runEmvFlowOnce(uint64_t amountCents) {
     }
     if (card.label[0] == '\0') {
       int ll = 0;
-      uint8_t *lp = tlvFind(gd, gdl, 0x50, &ll);
+      uint8_t *lp = EmvKernel::tlvFind(gd, gdl, 0x50, &ll);
       if (lp && ll > 0) {
         int n = min(ll, (int)sizeof(card.label) - 1);
         memcpy(card.label, lp, n);
@@ -777,7 +651,7 @@ static bool runEmvFlowOnce(uint64_t amountCents) {
     }
     if (!gotCDOL) {
       int cl = 0;
-      uint8_t *cp = tlvFind(gd, gdl, 0x8C, &cl);
+      uint8_t *cp = EmvKernel::tlvFind(gd, gdl, 0x8C, &cl);
       if (cp && cl > 0) {
         card.cdol1Len = (uint8_t)min(cl, (int)sizeof(card.cdol1));
         memcpy(card.cdol1, cp, card.cdol1Len);
@@ -785,15 +659,15 @@ static bool runEmvFlowOnce(uint64_t amountCents) {
       }
     }
     int al = 0;
-    uint8_t *ap = tlvFind(gd, gdl, 0x9F26, &al);
+    uint8_t *ap = EmvKernel::tlvFind(gd, gdl, 0x9F26, &al);
     if (ap && al >= 8) {
       memcpy(card.arqc, ap, 8);
       int atcl = 0;
-      uint8_t *atcp = tlvFind(gd, gdl, 0x9F36, &atcl);
+      uint8_t *atcp = EmvKernel::tlvFind(gd, gdl, 0x9F36, &atcl);
       if (atcp && atcl >= 2)
         memcpy(card.atc, atcp, 2);
       int iadl = 0;
-      uint8_t *iadp = tlvFind(gd, gdl, 0x9F10, &iadl);
+      uint8_t *iadp = EmvKernel::tlvFind(gd, gdl, 0x9F10, &iadl);
       if (iadp) {
         card.iadLen = (uint8_t)min(iadl, (int)sizeof(card.iad));
         memcpy(card.iad, iadp, card.iadLen);
@@ -914,13 +788,13 @@ static void buildWebJson(uint64_t amountCents) {
   doc["iad"] = buf;
   HexUtils::toCompact(card.cdol1, card.cdol1Len, buf);
   doc["cdol1"] = buf;
-  HexUtils::toCompact(TERM_TTQ, 4, buf);
+  HexUtils::toCompact(TERM.ttq, 4, buf);
   doc["ttq"] = buf;
-  HexUtils::toCompact(CVM_RESULTS, 3, buf);
+  HexUtils::toCompact(TERM.cvmResults, 3, buf);
   doc["cvmResults"] = buf;
   doc["amount_cents"] = (uint32_t)amountCents;
   doc["txn_date"] =
-      TXN_DATE; // YYMMDD usado en CDOL1 tag 9A — sincronizado con buildDolData
+      TERM.txnDate; // YYMMDD (tag 9A del CDOL) — misma fuente que EmvKernel
   serializeJson(doc, webResult, sizeof(webResult));
 }
 
@@ -1768,7 +1642,7 @@ static void handleTest(WiFiClient &client, const String &id) {
     // Buscar PAN en GPO y en records
     auto tryExtractPAN = [&](uint8_t *buf, int blen) {
       int l = 0;
-      uint8_t *p57 = tlvFind(buf, blen, 0x57, &l);
+      uint8_t *p57 = EmvKernel::tlvFind(buf, blen, 0x57, &l);
       if (p57 && l > 0) {
         HexUtils::toCompact(p57, l, card.track2);
         char *sep = strchr(card.track2, 'D');
@@ -1782,7 +1656,7 @@ static void handleTest(WiFiClient &client, const String &id) {
       }
       if (!card.pan[0]) {
         int l2 = 0;
-        uint8_t *p5A = tlvFind(buf, blen, 0x5A, &l2);
+        uint8_t *p5A = EmvKernel::tlvFind(buf, blen, 0x5A, &l2);
         if (p5A && l2 > 0) {
           HexUtils::toCompact(p5A, l2, card.pan);
           int n = strlen(card.pan);
@@ -1792,7 +1666,7 @@ static void handleTest(WiFiClient &client, const String &id) {
       }
       if (!card.expiry[0]) {
         int el = 0;
-        uint8_t *ep = tlvFind(buf, blen, 0x5F24, &el);
+        uint8_t *ep = EmvKernel::tlvFind(buf, blen, 0x5F24, &el);
         if (ep && el >= 3) {
           char tmp[8];
           HexUtils::toCompact(ep, 3, tmp);
@@ -1802,7 +1676,7 @@ static void handleTest(WiFiClient &client, const String &id) {
       }
       if (!card.label[0]) {
         int ll = 0;
-        uint8_t *lp = tlvFind(buf, blen, 0x50, &ll);
+        uint8_t *lp = EmvKernel::tlvFind(buf, blen, 0x50, &ll);
         if (lp && ll > 0) {
           int n = min(ll, (int)sizeof(card.label) - 1);
           memcpy(card.label, lp, n);
@@ -1812,7 +1686,7 @@ static void handleTest(WiFiClient &client, const String &id) {
     };
     tryExtractPAN(gpo, (gpoLen > 2) ? gpoLen - 2 : 0);
     int aflL = 0;
-    uint8_t *aflP = tlvFind(gpo, gpoLen - 2, 0x94, &aflL);
+    uint8_t *aflP = EmvKernel::tlvFind(gpo, gpoLen - 2, 0x94, &aflL);
     if (!aflP && gpoLen >= 6 && gpo[0] == 0x80) {
       aflP = gpo + 4;
       aflL = gpoLen - 6;
@@ -1893,7 +1767,7 @@ static void handleTest(WiFiClient &client, const String &id) {
     pass = selectPPSE(resp, rLen);
     if (pass) {
       int al = 0;
-      uint8_t *ap = tlvFind(resp, rLen - 2, 0x4F, &al);
+      uint8_t *ap = EmvKernel::tlvFind(resp, rLen - 2, 0x4F, &al);
       if (ap) {
         char h[34];
         HexUtils::toCompact(ap, al, h);
@@ -1928,7 +1802,7 @@ static void handleTest(WiFiClient &client, const String &id) {
         SLOGF("AID: %s = %s", AIDS[a].name, h);
         // Check PDOL
         int pdolL = 0;
-        uint8_t *pdol = tlvFind(fci, fciLen - 2, 0x9F38, &pdolL);
+        uint8_t *pdol = EmvKernel::tlvFind(fci, fciLen - 2, 0x9F38, &pdolL);
         if (pdol)
           SLOGF("PDOL presente: %d bytes", pdolL);
         else
@@ -1968,9 +1842,9 @@ static void handleTest(WiFiClient &client, const String &id) {
     pass = getProcessingOptions(fci, fciLen, gpo, gpoLen, 500);
     if (pass) {
       int aipL = 0;
-      uint8_t *aipP = tlvFind(gpo, gpoLen - 2, 0x82, &aipL);
+      uint8_t *aipP = EmvKernel::tlvFind(gpo, gpoLen - 2, 0x82, &aipL);
       int aflL = 0;
-      uint8_t *aflP = tlvFind(gpo, gpoLen - 2, 0x94, &aflL);
+      uint8_t *aflP = EmvKernel::tlvFind(gpo, gpoLen - 2, 0x94, &aflL);
       if (!aipP && gpoLen >= 6 && gpo[0] == 0x80) {
         aipP = gpo + 2;
         aipL = 2;
@@ -2014,7 +1888,7 @@ static void handleTest(WiFiClient &client, const String &id) {
     uint8_t gpoLen = 0;
     getProcessingOptions(fci, fciLen, gpo, gpoLen, 100);
     int aflL = 0;
-    uint8_t *aflP = tlvFind(gpo, gpoLen - 2, 0x94, &aflL);
+    uint8_t *aflP = EmvKernel::tlvFind(gpo, gpoLen - 2, 0x94, &aflL);
     if (!aflP && gpoLen >= 6 && gpo[0] == 0x80) {
       aflP = gpo + 4;
       aflL = gpoLen - 6;
@@ -2029,9 +1903,9 @@ static void handleTest(WiFiClient &client, const String &id) {
     pass = readRecord(sfi, rec, rr, rl);
     if (pass) {
       int t57l = 0;
-      uint8_t *t57 = tlvFind(rr, rl - 2, 0x57, &t57l);
+      uint8_t *t57 = EmvKernel::tlvFind(rr, rl - 2, 0x57, &t57l);
       int ppl = 0;
-      uint8_t *pp = tlvFind(rr, rl - 2, 0x5A, &ppl);
+      uint8_t *pp = EmvKernel::tlvFind(rr, rl - 2, 0x5A, &ppl);
       bool hasPAN = (t57 || pp);
       snprintf(detail, sizeof(detail), "SFI=%d REC=%d OK | %d bytes | PAN: %s",
                sfi, rec, rl - 2, hasPAN ? "SI" : "no visible");
@@ -2222,10 +2096,10 @@ static void handleTest(WiFiClient &client, const String &id) {
     getProcessingOptions(fci, fciLen, gpo, gpoLen, 100);
     // ATC puede venir en GPO (template 80) o en records
     int atcL = 0;
-    uint8_t *atcP = tlvFind(gpo, gpoLen - 2, 0x9F36, &atcL);
+    uint8_t *atcP = EmvKernel::tlvFind(gpo, gpoLen - 2, 0x9F36, &atcL);
     if (!atcP) {
       int aflL = 0;
-      uint8_t *aflP = tlvFind(gpo, gpoLen - 2, 0x94, &aflL);
+      uint8_t *aflP = EmvKernel::tlvFind(gpo, gpoLen - 2, 0x94, &aflL);
       if (!aflP && gpoLen >= 6 && gpo[0] == 0x80) {
         aflP = gpo + 4;
         aflL = gpoLen - 6;
@@ -2235,7 +2109,7 @@ static void handleTest(WiFiClient &client, const String &id) {
         uint8_t rr[256];
         uint8_t rl = 0;
         if (readRecord(sfi, rec, rr, rl))
-          atcP = tlvFind(rr, rl - 2, 0x9F36, &atcL);
+          atcP = EmvKernel::tlvFind(rr, rl - 2, 0x9F36, &atcL);
       }
     }
     pass = (atcP && atcL >= 2);
@@ -2270,7 +2144,7 @@ static void handleTest(WiFiClient &client, const String &id) {
     getProcessingOptions(fci, fciLen, gpo, gpoLen, 100);
     // CVM List está en records
     int aflL = 0;
-    uint8_t *aflP = tlvFind(gpo, gpoLen - 2, 0x94, &aflL);
+    uint8_t *aflP = EmvKernel::tlvFind(gpo, gpoLen - 2, 0x94, &aflL);
     if (!aflP && gpoLen >= 6 && gpo[0] == 0x80) {
       aflP = gpo + 4;
       aflL = gpoLen - 6;
@@ -2284,7 +2158,7 @@ static void handleTest(WiFiClient &client, const String &id) {
           uint8_t rr[256];
           uint8_t rl = 0;
           if (readRecord(sfi, r, rr, rl)) {
-            cvmP = tlvFind(rr, rl - 2, 0x8E, &cvmL);
+            cvmP = EmvKernel::tlvFind(rr, rl - 2, 0x8E, &cvmL);
           }
         }
       }
@@ -2340,7 +2214,7 @@ static void handleTest(WiFiClient &client, const String &id) {
     uint8_t gpoLen = 0;
     getProcessingOptions(fci, fciLen, gpo, gpoLen, 100);
     int aipL = 0;
-    uint8_t *aipP = tlvFind(gpo, gpoLen - 2, 0x82, &aipL);
+    uint8_t *aipP = EmvKernel::tlvFind(gpo, gpoLen - 2, 0x82, &aipL);
     if (!aipP && gpoLen >= 6 && gpo[0] == 0x80) {
       aipP = gpo + 2;
       aipL = 2;
@@ -2390,7 +2264,7 @@ static void handleTest(WiFiClient &client, const String &id) {
     auto checkTag = [&](uint8_t *buf, int blen, uint16_t tag,
                         const char *name) {
       int l = 0;
-      uint8_t *p = tlvFind(buf, blen, tag, &l);
+      uint8_t *p = EmvKernel::tlvFind(buf, blen, tag, &l);
       if (p && l > 0) {
         char h[32];
         HexUtils::toCompact(p, min(l, 12), h);
@@ -2411,7 +2285,7 @@ static void handleTest(WiFiClient &client, const String &id) {
     got |= checkTag(fci, fciLen - 2, 0x9F6D, "CL Limit(FCI)");
     // Check PDOL for 9F66
     int pdolL = 0;
-    uint8_t *pdol = tlvFind(fci, fciLen - 2, 0x9F38, &pdolL);
+    uint8_t *pdol = EmvKernel::tlvFind(fci, fciLen - 2, 0x9F38, &pdolL);
     if (pdol && pdolL > 0) {
       char h[50];
       HexUtils::toCompact(pdol, min(pdolL, 20), h);
@@ -2460,7 +2334,7 @@ static void handleTest(WiFiClient &client, const String &id) {
     getProcessingOptions(fci, fciLen, gpo, gpoLen, 500);
     // Read records for CDOL
     int aflL = 0;
-    uint8_t *aflP = tlvFind(gpo, gpoLen - 2, 0x94, &aflL);
+    uint8_t *aflP = EmvKernel::tlvFind(gpo, gpoLen - 2, 0x94, &aflL);
     if (!aflP && gpoLen >= 6 && gpo[0] == 0x80) {
       aflP = gpo + 4;
       aflL = gpoLen - 6;
@@ -2475,7 +2349,7 @@ static void handleTest(WiFiClient &client, const String &id) {
             continue;
           if (!card.cdol1Len) {
             int cl = 0;
-            uint8_t *cp = tlvFind(rr, rl - 2, 0x8C, &cl);
+            uint8_t *cp = EmvKernel::tlvFind(rr, rl - 2, 0x8C, &cl);
             if (cp && cl > 0) {
               card.cdol1Len = (uint8_t)min(cl, (int)sizeof(card.cdol1));
               memcpy(card.cdol1, cp, card.cdol1Len);
@@ -2491,7 +2365,7 @@ static void handleTest(WiFiClient &client, const String &id) {
     if (acOk && genLen >= 3) {
       // Check tag 9F27 (Cryptogram Information Data)
       int cidL = 0;
-      uint8_t *cidP = tlvFind(gen, genLen - 2, 0x9F27, &cidL);
+      uint8_t *cidP = EmvKernel::tlvFind(gen, genLen - 2, 0x9F27, &cidL);
       // Also check raw template 80
       uint8_t cidByte = 0;
       if (cidP && cidL >= 1) {
