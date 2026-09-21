@@ -50,7 +50,7 @@
 // ---------------------------------------------------------------------------
 #define AP_SSID "EMVyBomberCat"
 #define AP_PASS "bombercat"
-#define FW_VERSION "1.0"
+#define BOMBERCAT_FW_VERSION "1.1.0.1"
 WiFiServer server(80);
 
 // ---------------------------------------------------------------------------
@@ -1082,8 +1082,8 @@ static const char PAGE_HTML[] =
     "<header>"
     "<div class='brand'>"
     "<div class='brand-mark'>&#9651;</div>"
-    "<h1>EMVyBomberCat <small>parte de EMVy Controller &middot; v" FW_VERSION
-    "</small></h1>"
+    "<h1>EMVyBomberCat <small>parte de EMVy Controller &middot; "
+    "v" BOMBERCAT_FW_VERSION "</small></h1>"
     "</div>"
     "<span class='chip chip-p'>EMVy</span>"
     "<span class='chip chip-g'>HTTP</span>"
@@ -1278,7 +1278,7 @@ static const char PAGE_HTML[] =
     "</div>"
 
     /* ----- Footer: credito EMVy ----- */
-    "<footer>EMVyBomberCat v" FW_VERSION
+    "<footer>EMVyBomberCat v" BOMBERCAT_FW_VERSION
     " &middot; parte de <b>EMVy Controller</b> "
     "&middot; passthrough APDU activo (serie @115200)</footer>"
 
@@ -3591,7 +3591,7 @@ static void handleSerialCmd(const String &cmd) {
   // Read-only: no cambia estado.
   if (up == "INFO") {
     Serial.println(":fw_name emvybombercat");
-    Serial.println(":fw " FW_VERSION);
+    Serial.println(":fw " BOMBERCAT_FW_VERSION);
     Serial.println(":role emv-multitool");
     Serial.println("+OK");
     return;

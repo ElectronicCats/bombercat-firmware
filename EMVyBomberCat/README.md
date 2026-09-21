@@ -92,7 +92,6 @@ aparezca con ✓ en `device list`— ya es conforme.
 - `EMVyBomberCat.ino` — base: lector EMV + passthrough + servidor web + dispatcher serie.
 - `modes_tags.ino`    — modo TAGS (reusa el objeto `nfc` PN7150).
 - `modes_mag.ino`     — modo MAG (magspoof, pines A=6/B=7).
-- `certs.h`           — certificados del servidor web (del lector original).
 
 ## Compilar y flashear
 
@@ -105,27 +104,32 @@ aparezca con ✓ en `device list`— ya es conforme.
 ### Opción A — Arduino IDE
 Abre `EMVyBomberCat.ino`, selecciona la placa BomberCat, y sube (Upload).
 
-### Opción B — arduino-cli
+### Opción B — script del repo (flujo oficial)
+Como con cualquier otro firmware de este monorepo, la imagen oficial se compila y flashea
+como `.uf2` (BOOTSEL) con el script en la raíz del repo:
 ```sh
-./build.sh            # compila (y opcionalmente sube con: ./build.sh upload)
+../flash_bombercat.sh -f EMVyBomberCat        # compila y sube
+../flash_bombercat.sh -f EMVyBomberCat -c     # solo compila (no sube)
 ```
-También desde la TUI de EMVy: pestaña **BomberCat** → elige el sketch → **Compilar** /
-**Compilar y subir (picotool)**.
 
-> **Importante**: esta placa sube por **picotool** (`bombercat.upload.tool=picotool`; reset a
-> 1200-bps + carga directa del `.elf`/`.bin` vía `arduino-cli upload`), **no** por `.uf2`. El
-> flasheo `.uf2` (BOOTSEL + copiar a `RPI-RP2`) es el que usa `bombercat-tools` para las imágenes
-> **oficiales** prebuilt (NFCGate, magspoof…) — no para tu propio firmware compilado aquí.
+### Opción C — TUI de EMVy (compilación local del usuario)
+Pestaña **BomberCat** → elige el sketch → **Compilar** / **Compilar y subir (picotool)**. Este
+flujo sube por **picotool** (`bombercat.upload.tool=picotool`; reset a 1200-bps + carga directa
+del `.elf`/`.bin` vía `arduino-cli upload`) en vez de `.uf2`, y es el que usa quien compila su
+propio firmware localmente desde la TUI de EMVyController — no es el flujo de las imágenes
+oficiales del repo (esas van por `.uf2`/BOOTSEL, ver Opción B).
 
-**Permisos USB (Linux)**: picotool/`arduino-cli upload` necesitan acceso crudo al dispositivo RP2040
-en modo BOOTSEL (`idVendor=2e8a`). Sin una regla `udev`, falla con *"No accessible RP2040 devices...
-try sudo or check your permissions"* aunque el touch-reset a 1200-bps sí funcione. Arréglalo una vez:
+**Permisos USB (Linux) para picotool**: picotool/`arduino-cli upload` necesitan acceso crudo al
+dispositivo RP2040 en modo BOOTSEL (`idVendor=2e8a`). Sin una regla `udev`, falla con *"No
+accessible RP2040 devices... try sudo or check your permissions"* aunque el touch-reset a
+1200-bps sí funcione. Arréglalo una vez:
 ```sh
 echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="2e8a", MODE="0666"' | sudo tee /etc/udev/rules.d/99-pico.rules
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 **Alternativa sin permisos**: convierte el `.elf` a `.uf2` con la herramienta del paquete de la placa
-y cópialo a la unidad `RPI-RP2` montada (funciona siempre, sin udev ni sudo):
+y cópialo a la unidad `RPI-RP2` montada (funciona siempre, sin udev ni sudo — es lo que hace
+`flash_bombercat.sh` de la Opción B):
 ```sh
 ELF2UF2=$(find ~/.arduino15 -iname elf2uf2 | head -1)
 "$ELF2UF2" build/EMVyBomberCat.ino.elf build/EMVyBomberCat.ino.uf2
