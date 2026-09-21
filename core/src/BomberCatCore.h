@@ -19,6 +19,8 @@
  *                   forward-only waveforms), shared by the MagSpoof sketches
  *   - TagReader   : PN7150 tag helpers (hexCompact / protocolName /
  *                   emitTagEvent) shared by the tag/reader sketches
+ *   - EmvKernel  : pure EMV L2 contactless codec (BER-TLV search, amount
+ *                  encoding, DOL builder), transport-independent
  *
  * Distributed as-is; no warranty is given.
  */
@@ -26,6 +28,7 @@
 #define BOMBERCAT_CORE_H
 
 #include "ConfigStore.h"
+#include "EmvKernel.h"
 #include "HexUtils.h"
 #include "Log.h"
 #include "MagStripe.h"
