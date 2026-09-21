@@ -43,6 +43,10 @@
         {
             "filename": "ESP32SerialPassthroughFlash.uf2",
             "description": "Utility firmware that turns the RP2040 into a transparent serial passthrough to the BomberCat's onboard ESP32/NINA module. It bridges USB serial to the ESP32's UART so the user can send AT commands, watch bootloader output, or flash new firmware onto the ESP32 (e.g. with Espressif's Flash Download Tool) through the RP2040. It is a maintenance/recovery tool for updating or debugging the WiFi co-processor, not an attack or NFC firmware."
+        },
+        {
+            "filename": "EMVyBomberCat.uf2",
+            "description": "Swiss-army firmware from the EMVy Controller project, driving the BomberCat's onboard PN7150 as a multi-tool over USB serial: EMV contactless read (SELECT PPSE/AID, GPO, records), transparent APDU passthrough (PING/WAIT/APDU:/RELEASE) so a host can run any ISO 7816 flow through the front-end, NFC tag UID read, MagSpoof magnetic-stripe emulation, observable/cancelable NFC Forum Type 4 (NDEF) tag emulation, and EMV payment-card emulation for profiling and fuzzing terminals. It implements the BomberCatControl discovery contract (ping->'+OK bombercat', info->fw_name, identify, and '-ERR' for unknown verbs) so bombercat-tools recognises it via status/device list, and it raises a WiFi access point with a web panel. Its operational commands speak EMVy Controller's own serial dialect rather than the tags/mifare/relay/magspoof protocols, so it advertises only the identify/monitor/passthrough capabilities. Built from source with arduino-cli (multi-file sketch)."
         }
     ]
 }
