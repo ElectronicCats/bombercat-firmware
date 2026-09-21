@@ -1,19 +1,16 @@
-#define L1 (LED_BUILTIN) // LED1
-#define PIN_A (6)        // MagSpoof-1
-#define PIN_B (7)        // MagSpoof
-#define NPIN (5)         // Button
-#define CLOCK_US (500)
-#define BETWEEN_ZERO (53) // 53 zeros between track1 & 2
-#define TRACKS (2)
+#include <MagStripe.h>
+
+#define NPIN                                                                   \
+  (5) // Button. Kept here because WiFiWebServer.ino's ezButton is
+      // constructed with it; the H-bridge / LED / clock config now
+      // lives in MagStripe (see `stripe` below).
 #define DEBUGCAT
 
 bool runMagspoof = false;
 char tracks[2][128];
-
-char revTrack[41];
-
-const int sublen[] = {32, 48, 48};
-const int bitlen[] = {7, 5, 5};
-
 unsigned int curTrack = 0;
-int dir;
+
+// Classic MagSpoof F2F engine, shared via BomberCatCore. Defaults to BomberCat
+// wiring (PIN_A=6, PIN_B=7, NPIN=5, LED_BUILTIN, 500us clock, track-1 ->
+// track-2-reverse pass) - byte-identical to the previous inline engine.
+MagStripe stripe(MagStripe::classic());

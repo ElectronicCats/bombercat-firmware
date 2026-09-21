@@ -27,6 +27,7 @@
 #include "CardDatabase.h"
 #include "Log.h"
 #include "NfcController.h"
+#include <MagStripe.h>
 
 // 1.2.4.0: `nfcread` now takes an optional [name] argument so a scan can
 // target a chosen card instead of always overwriting the active one -- an
@@ -84,9 +85,14 @@
 
 char tracks[2][128]; // 2 tracks, 128 chars each (max)
 
-const int bitlen[] = {7, 5, 5};
-
-int dir;
+// Shared MagSpoof F2F engine (BomberCatCore), forward-only waveform: 60 leading
+// zeros for a long PLL lock and NO reverse pass (an MSR decodes both
+// directions, so a reverse pass would read the data twice, once corrupted at
+// the sentinel). Character encoding matches the old inline engine exactly
+// (c - sublen[track] == the former encodeTrack1/2Char). Declared here so the
+// playTrack() wrapper below can see it. Pins default to BomberCat wiring
+// (PIN_A=6, PIN_B=7, NPIN=5, LED_BUILTIN, 500us clock).
+MagStripe stripe(MagStripe::forwardOnly());
 
 // Which track the physical NPIN button reproduces: 0 alternates 1 <-> 2 (the
 // historical behaviour), 1 or 2 pin it to that single track. Set over the REPL
@@ -168,102 +174,10 @@ static void loadActiveIntoRam() {
   buttonTrack = cardDb.buttonTrack();
 }
 
-void blink(int pin, int msdelay, int times) {
-  for (int i = 0; i < times; i++) {
-    digitalWrite(pin, HIGH);
-    delay(msdelay);
-    digitalWrite(pin, LOW);
-    delay(msdelay);
-  }
-}
-
-// send a single bit out
-void playBit(int sendBit) {
-  dir ^= 1;
-  digitalWrite(PIN_A, dir);
-  digitalWrite(PIN_B, !dir);
-  delayMicroseconds(CLOCK_US);
-
-  if (sendBit) {
-    dir ^= 1;
-    digitalWrite(PIN_A, dir);
-    digitalWrite(PIN_B, !dir);
-  }
-  delayMicroseconds(CLOCK_US);
-}
-
-// ISO/IEC 7813 Track 2 5-bit encoding (4 data bits + 1 odd parity, parity
-// added by emitTrackForward's crc logic). The BCD table for the accepted
-// char range (0x30-0x3F, enforced by validateTrack) is a straight linear
-// offset from ASCII: '0'-'9' -> 0-9, ':' -> 10, ';' (start sentinel) -> 11,
-// '<' -> 12, '=' (field separator) -> 13, '>' -> 14, '?' (end sentinel) -> 15.
-static uint8_t encodeTrack2Char(char c) { return (uint8_t)(c - '0'); }
-
-// ISO/IEC 7811-2 Track 1 6-bit encoding (parity added by emitTrackForward's
-// crc logic). The alphanumeric code table for the accepted char range
-// (0x20-0x5F, enforced by validateTrack) is a straight linear offset from
-// ASCII: ' ' -> 0, ..., '%' (start sentinel) -> 5, ..., '0'-'9' -> 16-25,
-// ..., 'A'-'Z' -> 33-58, ..., '?' (end sentinel) -> 31, '^' -> 38, '_' -> 63.
-static uint8_t encodeTrack1Char(char c) { return (uint8_t)(c - 0x20); }
-
-// Emit one track forward: leading clock zeros, the track's F2F characters and
-// the LRC byte. `idx` is the 0-based track index. Leaves the field running (no
-// trailing zeros / no pins-low) so the caller decides when to drop the field
-// via endSwipe().
-static void emitTrackForward(int idx) {
-  int tmp, crc, lrc = 0;
-
-  // First put out a bunch of leading zeros so the reader locks its clock.
-  for (int i = 0; i < LEADING_ZEROS; i++)
-    playBit(0);
-
-  for (int i = 0; tracks[idx][i] != '\0'; i++) {
-    crc = 1;
-    if (idx == 0) {
-      tmp = encodeTrack1Char(tracks[idx][i]);
-    } else {
-      tmp = encodeTrack2Char(tracks[idx][i]);
-    }
-
-    for (int j = 0; j < bitlen[idx] - 1; j++) {
-      crc ^= tmp & 1;
-      lrc ^= (tmp & 1) << j;
-      playBit(tmp & 1);
-      tmp >>= 1;
-    }
-    playBit(crc);
-  }
-
-  // finish calculating and send last "byte" (LRC)
-  tmp = lrc;
-  crc = 1;
-  for (int j = 0; j < bitlen[idx] - 1; j++) {
-    crc ^= tmp & 1;
-    playBit(tmp & 1);
-    tmp >>= 1;
-  }
-  playBit(crc);
-}
-
-// Close the emulated swipe: trailing zeros, then drop the H-bridge.
-static void endSwipe() {
-  for (int i = 0; i < 5 * 5; i++)
-    playBit(0);
-
-  digitalWrite(PIN_A, LOW);
-  digitalWrite(PIN_B, LOW);
-}
-
-// Emit a single track as one clean forward swipe: the track forward, then the
-// field is dropped. Forward-only (no reverse/there-and-back pass): a magnetic
-// stripe reader (MSR) decodes in both directions, so appending a reverse pass
-// makes it read the data twice, once corrupted at the sentinel. `track` is 1|2.
-void playTrack(int track) {
-  dir = 0;
-  track--; // index 0
-  emitTrackForward(track);
-  endSwipe();
-}
+// Emit a single track as one clean forward swipe via the shared engine. `track`
+// is 1|2. Thin wrapper so playActiveCard()/magspoof() read unchanged; the
+// forward-only waveform and encoding live in MagStripe (see `stripe` above).
+void playTrack(int track) { stripe.playTrack(track, tracks); }
 
 // Whether the live copy of track `t` (1 or 2) currently holds data.
 static bool trackPresent(int t) { return tracks[t - 1][0] != '\0'; }
@@ -292,7 +206,7 @@ static int playActiveCard() {
 }
 
 void magspoof() {
-  if (digitalRead(NPIN) == 0) {
+  if (stripe.buttonPressed()) {
     Serial.println("Activating MagSpoof...");
     int track;
     if (buttonTrack == 1 && trackPresent(1)) {
@@ -309,11 +223,11 @@ void magspoof() {
     }
     if (track != 0)
       emitMagEvent(millis(), track);
-    blink(L1, 150, 3);
+    stripe.blink(150, 3);
     // Wait for the button to be released before allowing another swipe. The old
     // fixed delay(400) let a held button auto-repeat, which a reader captured
     // as a duplicate swipe; requiring a release makes one press = one swipe.
-    while (digitalRead(NPIN) == 0)
+    while (stripe.buttonPressed())
       ;
     delay(50); // debounce the release
   }
@@ -343,8 +257,8 @@ static void rstripArgs(char *s) {
 // Shared ISO-track validation for `magset` and `magcard set`: returns nullptr
 // when `data` is a valid track for `track` (1 or 2), else a short error slug
 // for a "-ERR <slug>" reply. Enforces the sentinels, length, and the F2F
-// charset (encodeTrack1Char/encodeTrack2Char map each char to its ISO 7813/
-// 7811 5/7-bit value; invalid chars are rejected here).
+// charset (MagStripe maps each char to its ISO 7813/7811 5/7-bit value via the
+// c - sublen[track] offset; invalid chars are rejected here).
 static const char *validateTrack(int track, const char *data) {
   size_t len = strlen(data);
   if (len > TRACK_MAX_CHARS)
@@ -435,7 +349,7 @@ static bool handleCommand(const char *verb, char *args) {
     emitMagEvent(millis(), track);
     Serial.print("+OK played ");
     Serial.println(track);
-    blink(L1, 150, 3); // after the terminator: 900 ms the host need not wait
+    stripe.blink(150, 3); // after the terminator: 900 ms the host need not wait
     return true;
   }
 
@@ -1328,10 +1242,7 @@ static bool unpackTrack2Equivalent(const uint8_t *data, uint8_t len, char *out,
 BomberCatControl control(Serial, BOMBERCAT_FW_VERSION, "magspoof");
 
 void setup() {
-  pinMode(PIN_A, OUTPUT);
-  pinMode(PIN_B, OUTPUT);
-  pinMode(L1, OUTPUT);
-  pinMode(NPIN, INPUT_PULLUP);
+  stripe.begin(); // H-bridge / LED / button pin setup
 
   Serial.begin(115200);
   while (!Serial)
@@ -1345,7 +1256,7 @@ void setup() {
   Log::begin(Serial, LogLevel::Warn);
 
   // blink to show we started up
-  blink(L1, 200, 2);
+  stripe.blink(200, 2);
 
   // Bring up the persistent card store and load the active card into the live
   // playback state. On first boot this seeds the single DEFAULT card (plan
