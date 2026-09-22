@@ -334,8 +334,17 @@ static bool apduExchange(uint8_t *cmd, uint8_t cmdLen, uint8_t *resp,
     respLen = 0;
     bool err = nfc.raw().readerTagCmd(cmd, cmdLen, resp, &respLen);
     if (err) {
-      Serial.print("# APDU ERR: ");
-      Serial.println(label);
+      // readerTagCmd() ya copia lo que haya en rxBuffer aunque marque error
+      // (timeout total vs. una notificación NCI en vez del DATA_PACKET dan
+      // el mismo "err", pero con contenido distinto en resp/respLen) — lo
+      // mostramos para poder distinguir el caso real la próxima vez.
+      size_t showLen = (respLen < 8) ? respLen : 8;
+      char hx[24];
+      HexUtils::toCompact(resp, showLen, hx);
+      char eb[90];
+      snprintf(eb, sizeof(eb), "# APDU ERR: %s (len=%u data=%s)", label,
+               (unsigned)respLen, hx);
+      Serial.println(eb);
       break;
     }
     drainNciFragments(resp, respLen);
