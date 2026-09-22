@@ -292,12 +292,16 @@ static uint32_t hwRand32() {
 // encodeAmount / EmvKernel::tlvFind) — antes definidos aquí. buildDolData
 // también se movió al kernel (ver más abajo, GET PROCESSING OPTIONS).
 
-static void drainNciFragments(uint8_t *resp, uint8_t &respLen) {
-  // Tope subido de 252 a 255 (máx. representable en respLen/uint8_t): con
-  // 252 el primer fragmento de un registro grande de Mastercard (p. ej.
-  // SFI=6 con ~253 bytes) ya llegaba por encima del tope y este bucle no
-  // llegaba ni a intentar leer la continuación de la cadena.
-  for (int frag = 0; frag < 16 && respLen < 255; frag++) {
+// Capacidad compartida de los buffers de respuesta EMV (resp/fci/gpo/rr/gen).
+// READ RECORD con Le=00 puede devolver legítimamente hasta 256 bytes de datos
+// + 2 de SW = 258 (caso real visto con el certificado de clave pública del
+// emisor de Mastercard, SFI grande) — 8 bits (máx. 255) se quedan cortos,
+// por eso las longitudes de este flujo son uint16_t y los buffers usan este
+// tope en vez de 256.
+static const uint16_t EMV_RESP_CAP = 264;
+
+static void drainNciFragments(uint8_t *resp, uint16_t &respLen) {
+  for (int frag = 0; frag < 16 && respLen < EMV_RESP_CAP; frag++) {
     delay(10);
     if (!nfc.raw().hasMessage())
       break;
@@ -314,7 +318,7 @@ static void drainNciFragments(uint8_t *resp, uint8_t &respLen) {
     Wire.requestFrom((uint8_t)PN7150_ADDR, fl);
     uint8_t got = 0;
     while (Wire.available() && got < fl) {
-      if (respLen < 255)
+      if (respLen < EMV_RESP_CAP)
         resp[respLen++] = Wire.read();
       else
         Wire.read();
@@ -326,7 +330,7 @@ static void drainNciFragments(uint8_t *resp, uint8_t &respLen) {
 }
 
 static bool apduExchange(uint8_t *cmd, uint8_t cmdLen, uint8_t *resp,
-                         uint8_t &respLen, const char *label) {
+                         uint16_t &respLen, const char *label) {
   for (int attempt = 0; attempt < 1; attempt++) {
     if (attempt == 0) {
       SLOGF("→ %s", label);
@@ -335,8 +339,13 @@ static bool apduExchange(uint8_t *cmd, uint8_t cmdLen, uint8_t *resp,
       delay(80);
     }
     delay(20);
-    respLen = 0;
-    bool err = nfc.raw().readerTagCmd(cmd, cmdLen, resp, &respLen);
+    // readerTagCmd() de la librería PN7150 exige un puntero a uint8_t para
+    // el tamaño (un único fragmento NCI nunca pasa de 255 bytes), así que
+    // recibimos ahí en un temporal de 8 bits y lo ampliamos a respLen
+    // (uint16_t) antes de drenar el resto de la cadena.
+    uint8_t firstFragLen = 0;
+    bool err = nfc.raw().readerTagCmd(cmd, cmdLen, resp, &firstFragLen);
+    respLen = firstFragLen;
     // readerTagCmd() marca "err" tanto en un timeout real como cuando el
     // PRIMER fragmento de una respuesta encadenada (NCI PBF=1) no trae el
     // header 00 00 que espera — y en ambos casos ya copió en resp/respLen
@@ -381,15 +390,16 @@ static bool apduExchange(uint8_t *cmd, uint8_t cmdLen, uint8_t *resp,
     // SW=61xx: tarjeta tiene más datos — emitir GET RESPONSE
     if (sw1 == 0x61 && sw2 > 0) {
       uint8_t gr[] = {0x00, 0xC0, 0x00, 0x00, sw2};
-      uint8_t grResp[256];
-      uint8_t grLen = 0;
+      uint8_t grResp[EMV_RESP_CAP];
+      uint8_t grFragLen = 0;
       delay(20);
-      if (!nfc.raw().readerTagCmd(gr, sizeof(gr), grResp, &grLen)) {
+      if (!nfc.raw().readerTagCmd(gr, sizeof(gr), grResp, &grFragLen)) {
+        uint16_t grLen = grFragLen;
         drainNciFragments(grResp, grLen);
         if (grLen >= 2) {
-          uint8_t origData = respLen - 2;
-          uint8_t newData = grLen - 2;
-          if ((int)origData + newData + 2 <= 255) {
+          uint16_t origData = respLen - 2;
+          uint16_t newData = grLen - 2;
+          if ((uint32_t)origData + newData + 2 <= EMV_RESP_CAP) {
             memcpy(resp + origData, grResp, grLen);
             respLen = origData + grLen;
             sw1 = resp[respLen - 2];
@@ -419,14 +429,14 @@ static bool apduExchange(uint8_t *cmd, uint8_t cmdLen, uint8_t *resp,
 // ---------------------------------------------------------------------------
 // EMV steps
 // ---------------------------------------------------------------------------
-static bool selectPPSE(uint8_t *resp, uint8_t &len) {
+static bool selectPPSE(uint8_t *resp, uint16_t &len) {
   uint8_t cmd[] = {0x00, 0xA4, 0x04, 0x00, 0x0E, '2', 'P', 'A', 'Y', '.',
                    'S',  'Y',  'S',  '.',  'D',  'D', 'F', '0', '1', 0x00};
   return apduExchange(cmd, sizeof(cmd), resp, len, "SELECT PPSE");
 }
 
 static bool selectAID(const uint8_t *aid, uint8_t aidLen, uint8_t *resp,
-                      uint8_t &len) {
+                      uint16_t &len) {
   uint8_t cmd[32];
   cmd[0] = 0x00;
   cmd[1] = 0xA4;
@@ -438,8 +448,8 @@ static bool selectAID(const uint8_t *aid, uint8_t aidLen, uint8_t *resp,
   return apduExchange(cmd, 6 + aidLen, resp, len, "SELECT AID");
 }
 
-static bool getProcessingOptions(uint8_t *fci, uint8_t fciLen, uint8_t *resp,
-                                 uint8_t &len, uint64_t amountCents) {
+static bool getProcessingOptions(uint8_t *fci, uint16_t fciLen, uint8_t *resp,
+                                 uint16_t &len, uint64_t amountCents) {
   uint8_t dolData[64];
   uint8_t dolLen = 0;
   int pdolLen = 0;
@@ -462,14 +472,14 @@ static bool getProcessingOptions(uint8_t *fci, uint8_t fciLen, uint8_t *resp,
   return apduExchange(cmd, 8 + dolLen, resp, len, "GET PROCESSING OPTIONS");
 }
 
-static bool readRecord(uint8_t sfi, uint8_t rec, uint8_t *resp, uint8_t &len) {
+static bool readRecord(uint8_t sfi, uint8_t rec, uint8_t *resp, uint16_t &len) {
   uint8_t cmd[] = {0x00, 0xB2, rec, (uint8_t)((sfi << 3) | 0x04), 0x00};
   char lbl[32];
   sprintf(lbl, "RR sfi=%d r=%d", sfi, rec);
   return apduExchange(cmd, sizeof(cmd), resp, len, lbl);
 }
 
-static bool generateAC(uint64_t amountCents, uint8_t *resp, uint8_t &len,
+static bool generateAC(uint64_t amountCents, uint8_t *resp, uint16_t &len,
                        uint8_t p1 = 0x80) {
   uint8_t cd[64];
   uint8_t cdLen = 0;
@@ -509,10 +519,35 @@ static bool generateAC(uint64_t amountCents, uint8_t *resp, uint8_t &len,
   cmd[4] = cdLen;
   memcpy(cmd + 5, cd, cdLen);
   cmd[5 + cdLen] = 0x00;
+  // Diagnóstico: el log original solo mostraba "# SW=6985 en GENERATE AC" sin
+  // el comando que la tarjeta rechazó, lo que forzaba a adivinar. Emitimos el
+  // P1/Lc y el CDOL1 descriptor + datos ensamblados para que un SW≠9000 sea
+  // diagnosticable en una sola corrida (qué tag/longitud/valor no cuadra). Solo
+  // se dispara en la ruta no-qVSDC (Mastercard), nunca en Visa.
+  //
+  // Fue justo esto lo que confirmó la causa del 6985 en hardware (2026-09-22):
+  // la línea "# CDOL1 data=…" mostró el monto arrancando en 000000000500 (BCD
+  // correcto) — antes iba en binario (…01F4). Con el monto en BCD (ver
+  // EmvKernel::encodeAmount) la Mastercard de prueba dejó de declinar y
+  // devolvió ARQC/ATC/IAD reales. Se deja el log activo como herramienta de
+  // diagnóstico.
+  {
+    char dhex[2 * sizeof(card.cdol1) + 1];
+    char cdhex[2 * 64 + 1];
+    HexUtils::toCompact(card.cdol1, card.cdol1Len, dhex);
+    HexUtils::toCompact(cd, cdLen, cdhex);
+    char hdr[64];
+    snprintf(hdr, sizeof(hdr), "# GEN AC P1=%02X Lc=%u", p1, (unsigned)cdLen);
+    Serial.println(hdr);
+    Serial.print("#   CDOL1 desc=");
+    Serial.println(dhex);
+    Serial.print("#   CDOL1 data=");
+    Serial.println(cdhex);
+  }
   return apduExchange(cmd, 6 + cdLen, resp, len, "GENERATE AC");
 }
 
-static bool parseGenerateAC(uint8_t *resp, uint8_t respLen) {
+static bool parseGenerateAC(uint8_t *resp, uint16_t respLen) {
   uint8_t *data = resp;
   int dLen = (respLen > 2) ? respLen - 2 : 0;
   if (dLen < 3)
@@ -582,8 +617,8 @@ static bool runEmvFlowOnce(uint64_t amountCents) {
   card.un[2] = (un >> 8) & 0xFF;
   card.un[3] = un & 0xFF;
 
-  uint8_t resp[256];
-  uint8_t respLen = 0;
+  uint8_t resp[EMV_RESP_CAP];
+  uint16_t respLen = 0;
   if (!selectPPSE(resp, respLen))
     return false;
 
@@ -598,8 +633,8 @@ static bool runEmvFlowOnce(uint64_t amountCents) {
     }
   }
 
-  uint8_t fci[256];
-  uint8_t fciLen = 0;
+  uint8_t fci[EMV_RESP_CAP];
+  uint16_t fciLen = 0;
   bool aidOk = false;
   if (ppseAidLen > 0 && selectAID(ppseAid, ppseAidLen, fci, fciLen)) {
     HexUtils::toCompact(ppseAid, ppseAidLen, card.aidHex);
@@ -616,8 +651,8 @@ static bool runEmvFlowOnce(uint64_t amountCents) {
   if (!aidOk)
     return false;
 
-  uint8_t gpo[256];
-  uint8_t gpoLen = 0;
+  uint8_t gpo[EMV_RESP_CAP];
+  uint16_t gpoLen = 0;
   if (!getProcessingOptions(fci, fciLen, gpo, gpoLen, amountCents))
     return false;
 
@@ -715,8 +750,8 @@ static bool runEmvFlowOnce(uint64_t amountCents) {
     for (int i = 0; i + 3 < aflL; i += 4) {
       uint8_t sfi = (aflP[i] >> 3), from = aflP[i + 1], to = aflP[i + 2];
       for (uint8_t r = from; r <= to; r++) {
-        uint8_t rr[256];
-        uint8_t rl = 0;
+        uint8_t rr[EMV_RESP_CAP];
+        uint16_t rl = 0;
         if (!readRecord(sfi, r, rr, rl) || rl < 2)
           continue;
         extractFromBuf(rr, rl - 2);
@@ -727,12 +762,34 @@ static bool runEmvFlowOnce(uint64_t amountCents) {
     return false;
 
   if (!qvsdc) {
-    uint8_t gen[256];
-    uint8_t genLen = 0;
-    if (!generateAC(amountCents, gen, genLen))
-      return false;
-    if (!parseGenerateAC(gen, genLen))
-      return false;
+    // Ruta no-qVSDC (Mastercard M/Chip y demás apps que NO exponen el
+    // criptograma en el GPO): el GENERATE AC aporta ARQC/ATC/IAD. Pero los
+    // datos identificatorios de la tarjeta (PAN/expiry/track2/AID) YA se
+    // extrajeron de los READ RECORD (extractFromBuf, arriba), así que el
+    // GENERATE AC es enriquecimiento, no un requisito para "leer" la tarjeta.
+    //
+    // Visa nunca llega aquí: su criptograma viene gratis en la respuesta al
+    // GPO (qvsdc=true) y este bloque se salta por completo. Mastercard, en
+    // cambio, puede declinar el GENERATE AC en su gestión de riesgo (p. ej.
+    // SW=6985, "conditions of use not satisfied"), lo cual antes hacía fallar
+    // TODA la lectura pese a tener ya PAN/track2. Ahora el GENERATE AC es
+    // best-effort: si la tarjeta responde, guardamos el criptograma; si lo
+    // declina, reportamos la tarjeta igual (el SW real ya quedó logueado por
+    // apduExchange y el APDU por generateAC, para diagnóstico posterior).
+    //
+    // Nota (probado en HW 2026-09-22): la causa real del 6985 resultó ser el
+    // monto en binario, ya corregido a BCD (EmvKernel::encodeAmount), así que
+    // la Mastercard de prueba ahora SÍ acepta el GENERATE AC y este best-effort
+    // no llega a activarse en el flujo feliz. Se conserva como red de
+    // seguridad: otra tarjeta/monto podría declinarlo por otra condición y la
+    // lectura de PAN/track2 no debe caerse por eso.
+    uint8_t gen[EMV_RESP_CAP];
+    uint16_t genLen = 0;
+    if (generateAC(amountCents, gen, genLen))
+      parseGenerateAC(gen, genLen);
+    else
+      Serial.println("# GENERATE AC declinado por la tarjeta; se reporta "
+                     "PAN/track2 sin criptograma (ARQC/ATC/IAD)");
   }
   card.valid = true;
   return true;
@@ -1560,8 +1617,8 @@ static void handleTest(WiFiClient &client, const String &id) {
       return;
     }
     SLOGF("Tarjeta ISO-DEP detectada");
-    uint8_t resp[256];
-    uint8_t rLen = 0;
+    uint8_t resp[EMV_RESP_CAP];
+    uint16_t rLen = 0;
     pass = selectPPSE(resp, rLen);
     if (pass) {
       SLOGF("SELECT PPSE OK");
@@ -1611,15 +1668,15 @@ static void handleTest(WiFiClient &client, const String &id) {
     }
     SLOGF("Tarjeta ISO-DEP detectada");
     // Intentar primero PPSE para referencia
-    uint8_t ppseresp[256];
-    uint8_t ppseLen = 0;
+    uint8_t ppseresp[EMV_RESP_CAP];
+    uint16_t ppseLen = 0;
     selectPPSE(ppseresp, ppseLen);
     // Probar cada AID
     char found[140] = "";
     int ok = 0, total = NUM_ALL_AIDS;
     for (int a = 0; a < total; a++) {
-      uint8_t fci[256];
-      uint8_t fciLen = 0;
+      uint8_t fci[EMV_RESP_CAP];
+      uint16_t fciLen = 0;
       if (selectAID(ALL_AIDS[a].b, ALL_AIDS[a].l, fci, fciLen)) {
         ok++;
         if (strlen(found) + strlen(ALL_AIDS[a].n) + 3 < sizeof(found)) {
@@ -1651,12 +1708,12 @@ static void handleTest(WiFiClient &client, const String &id) {
     card.un[2] = (un >> 8) & 0xFF;
     card.un[3] = un & 0xFF;
     // PPSE → AID → GPO → Records
-    uint8_t resp[256];
-    uint8_t rLen = 0;
+    uint8_t resp[EMV_RESP_CAP];
+    uint16_t rLen = 0;
     selectPPSE(resp, rLen);
     rLen = 0;
-    uint8_t fci[256];
-    uint8_t fciLen = 0;
+    uint8_t fci[EMV_RESP_CAP];
+    uint16_t fciLen = 0;
     bool aidOk = false;
     for (int a = 0; a < NUM_AIDS && !aidOk; a++) {
       if (selectAID(AIDS[a].bytes, AIDS[a].len, fci, fciLen)) {
@@ -1670,8 +1727,8 @@ static void handleTest(WiFiClient &client, const String &id) {
       sResult(id, false, "Sin AID compatible", millis() - t0);
       return;
     }
-    uint8_t gpo[256];
-    uint8_t gpoLen = 0;
+    uint8_t gpo[EMV_RESP_CAP];
+    uint16_t gpoLen = 0;
     getProcessingOptions(fci, fciLen, gpo, gpoLen, 500);
     // Buscar PAN en GPO y en records
     auto tryExtractPAN = [&](uint8_t *buf, int blen) {
@@ -1729,8 +1786,8 @@ static void handleTest(WiFiClient &client, const String &id) {
       for (int i = 0; i + 3 < aflL; i += 4) {
         uint8_t sfi = (aflP[i] >> 3), from = aflP[i + 1], to = aflP[i + 2];
         for (uint8_t r = from; r <= to; r++) {
-          uint8_t rr[256];
-          uint8_t rl = 0;
+          uint8_t rr[EMV_RESP_CAP];
+          uint16_t rl = 0;
           if (readRecord(sfi, r, rr, rl) && rl > 2)
             tryExtractPAN(rr, rl - 2);
         }
@@ -1757,23 +1814,23 @@ static void handleTest(WiFiClient &client, const String &id) {
       return;
     }
     SLOGF("Tarjeta ISO-DEP detectada");
-    uint8_t resp[256];
-    uint8_t rLen = 0;
+    uint8_t resp[EMV_RESP_CAP];
+    uint16_t rLen = 0;
     selectPPSE(resp, rLen);
     rLen = 0;
-    uint8_t fci[256];
-    uint8_t fciLen = 0;
+    uint8_t fci[EMV_RESP_CAP];
+    uint16_t fciLen = 0;
     for (int a = 0; a < NUM_AIDS && !fciLen; a++)
       selectAID(AIDS[a].bytes, AIDS[a].len, fci, fciLen);
-    uint8_t gpo[256];
-    uint8_t gpoLen = 0;
+    uint8_t gpo[EMV_RESP_CAP];
+    uint16_t gpoLen = 0;
     if (fciLen)
       getProcessingOptions(fci, fciLen, gpo, gpoLen, 100);
     int found = 0;
     for (int sfi = 1; sfi <= 10 && found < 16; sfi++) {
       for (int rec = 1; rec <= 8 && found < 16; rec++) {
-        uint8_t rr[256];
-        uint8_t rl = 0;
+        uint8_t rr[EMV_RESP_CAP];
+        uint16_t rl = 0;
         if (readRecord((uint8_t)sfi, (uint8_t)rec, rr, rl) && rl > 2) {
           found++;
           char h[20];
@@ -1796,8 +1853,8 @@ static void handleTest(WiFiClient &client, const String &id) {
       return;
     }
     SLOGF("Tarjeta ISO-DEP detectada");
-    uint8_t resp[256];
-    uint8_t rLen = 0;
+    uint8_t resp[EMV_RESP_CAP];
+    uint16_t rLen = 0;
     pass = selectPPSE(resp, rLen);
     if (pass) {
       int al = 0;
@@ -1820,12 +1877,12 @@ static void handleTest(WiFiClient &client, const String &id) {
       return;
     }
     SLOGF("Tarjeta ISO-DEP detectada");
-    uint8_t resp[256];
-    uint8_t rLen = 0;
+    uint8_t resp[EMV_RESP_CAP];
+    uint16_t rLen = 0;
     selectPPSE(resp, rLen);
     rLen = 0;
-    uint8_t fci[256];
-    uint8_t fciLen = 0;
+    uint8_t fci[EMV_RESP_CAP];
+    uint16_t fciLen = 0;
     bool aidOk = false;
     for (int a = 0; a < NUM_AIDS && !aidOk; a++) {
       if (selectAID(AIDS[a].bytes, AIDS[a].len, fci, fciLen)) {
@@ -1855,12 +1912,12 @@ static void handleTest(WiFiClient &client, const String &id) {
       return;
     }
     SLOGF("Tarjeta ISO-DEP detectada");
-    uint8_t resp[256];
-    uint8_t rLen = 0;
+    uint8_t resp[EMV_RESP_CAP];
+    uint16_t rLen = 0;
     selectPPSE(resp, rLen);
     rLen = 0;
-    uint8_t fci[256];
-    uint8_t fciLen = 0;
+    uint8_t fci[EMV_RESP_CAP];
+    uint16_t fciLen = 0;
     for (int a = 0; a < NUM_AIDS && !fciLen; a++) {
       if (selectAID(AIDS[a].bytes, AIDS[a].len, fci, fciLen)) {
         SLOGF("AID: %s", AIDS[a].name);
@@ -1871,8 +1928,8 @@ static void handleTest(WiFiClient &client, const String &id) {
       sResult(id, false, "Sin AID", millis() - t0);
       return;
     }
-    uint8_t gpo[256];
-    uint8_t gpoLen = 0;
+    uint8_t gpo[EMV_RESP_CAP];
+    uint16_t gpoLen = 0;
     pass = getProcessingOptions(fci, fciLen, gpo, gpoLen, 500);
     if (pass) {
       int aipL = 0;
@@ -1906,20 +1963,20 @@ static void handleTest(WiFiClient &client, const String &id) {
       return;
     }
     SLOGF("Tarjeta ISO-DEP detectada");
-    uint8_t resp[256];
-    uint8_t rLen = 0;
+    uint8_t resp[EMV_RESP_CAP];
+    uint16_t rLen = 0;
     selectPPSE(resp, rLen);
     rLen = 0;
-    uint8_t fci[256];
-    uint8_t fciLen = 0;
+    uint8_t fci[EMV_RESP_CAP];
+    uint16_t fciLen = 0;
     for (int a = 0; a < NUM_AIDS && !fciLen; a++)
       selectAID(AIDS[a].bytes, AIDS[a].len, fci, fciLen);
     if (!fciLen) {
       sResult(id, false, "Sin AID", millis() - t0);
       return;
     }
-    uint8_t gpo[256];
-    uint8_t gpoLen = 0;
+    uint8_t gpo[EMV_RESP_CAP];
+    uint16_t gpoLen = 0;
     getProcessingOptions(fci, fciLen, gpo, gpoLen, 100);
     int aflL = 0;
     uint8_t *aflP = EmvKernel::tlvFind(gpo, gpoLen - 2, 0x94, &aflL);
@@ -1932,8 +1989,8 @@ static void handleTest(WiFiClient &client, const String &id) {
       return;
     }
     uint8_t sfi = (aflP[0] >> 3), rec = aflP[1];
-    uint8_t rr[256];
-    uint8_t rl = 0;
+    uint8_t rr[EMV_RESP_CAP];
+    uint16_t rl = 0;
     pass = readRecord(sfi, rec, rr, rl);
     if (pass) {
       int t57l = 0;
@@ -2113,20 +2170,20 @@ static void handleTest(WiFiClient &client, const String &id) {
       sResult(id, false, "Timeout tarjeta", millis() - t0);
       return;
     }
-    uint8_t resp[256];
-    uint8_t rLen = 0;
+    uint8_t resp[EMV_RESP_CAP];
+    uint16_t rLen = 0;
     selectPPSE(resp, rLen);
     rLen = 0;
-    uint8_t fci[256];
-    uint8_t fciLen = 0;
+    uint8_t fci[EMV_RESP_CAP];
+    uint16_t fciLen = 0;
     for (int a = 0; a < NUM_AIDS && !fciLen; a++)
       selectAID(AIDS[a].bytes, AIDS[a].len, fci, fciLen);
     if (!fciLen) {
       sResult(id, false, "Sin AID", millis() - t0);
       return;
     }
-    uint8_t gpo[256];
-    uint8_t gpoLen = 0;
+    uint8_t gpo[EMV_RESP_CAP];
+    uint16_t gpoLen = 0;
     getProcessingOptions(fci, fciLen, gpo, gpoLen, 100);
     // ATC puede venir en GPO (template 80) o en records
     int atcL = 0;
@@ -2140,8 +2197,8 @@ static void handleTest(WiFiClient &client, const String &id) {
       }
       if (aflP && aflL >= 4) {
         uint8_t sfi = (aflP[0] >> 3), rec = aflP[1];
-        uint8_t rr[256];
-        uint8_t rl = 0;
+        uint8_t rr[EMV_RESP_CAP];
+        uint16_t rl = 0;
         if (readRecord(sfi, rec, rr, rl))
           atcP = EmvKernel::tlvFind(rr, rl - 2, 0x9F36, &atcL);
       }
@@ -2161,20 +2218,20 @@ static void handleTest(WiFiClient &client, const String &id) {
       sResult(id, false, "Timeout tarjeta", millis() - t0);
       return;
     }
-    uint8_t resp[256];
-    uint8_t rLen = 0;
+    uint8_t resp[EMV_RESP_CAP];
+    uint16_t rLen = 0;
     selectPPSE(resp, rLen);
     rLen = 0;
-    uint8_t fci[256];
-    uint8_t fciLen = 0;
+    uint8_t fci[EMV_RESP_CAP];
+    uint16_t fciLen = 0;
     for (int a = 0; a < NUM_AIDS && !fciLen; a++)
       selectAID(AIDS[a].bytes, AIDS[a].len, fci, fciLen);
     if (!fciLen) {
       sResult(id, false, "Sin AID", millis() - t0);
       return;
     }
-    uint8_t gpo[256];
-    uint8_t gpoLen = 0;
+    uint8_t gpo[EMV_RESP_CAP];
+    uint16_t gpoLen = 0;
     getProcessingOptions(fci, fciLen, gpo, gpoLen, 100);
     // CVM List está en records
     int aflL = 0;
@@ -2189,8 +2246,8 @@ static void handleTest(WiFiClient &client, const String &id) {
       for (int i = 0; i + 3 < aflL && !cvmP; i += 4) {
         uint8_t sfi = (aflP[i] >> 3), from = aflP[i + 1], to = aflP[i + 2];
         for (uint8_t r = from; r <= to && !cvmP; r++) {
-          uint8_t rr[256];
-          uint8_t rl = 0;
+          uint8_t rr[EMV_RESP_CAP];
+          uint16_t rl = 0;
           if (readRecord(sfi, r, rr, rl)) {
             cvmP = EmvKernel::tlvFind(rr, rl - 2, 0x8E, &cvmL);
           }
@@ -2232,20 +2289,20 @@ static void handleTest(WiFiClient &client, const String &id) {
       sResult(id, false, "Timeout tarjeta", millis() - t0);
       return;
     }
-    uint8_t resp[256];
-    uint8_t rLen = 0;
+    uint8_t resp[EMV_RESP_CAP];
+    uint16_t rLen = 0;
     selectPPSE(resp, rLen);
     rLen = 0;
-    uint8_t fci[256];
-    uint8_t fciLen = 0;
+    uint8_t fci[EMV_RESP_CAP];
+    uint16_t fciLen = 0;
     for (int a = 0; a < NUM_AIDS && !fciLen; a++)
       selectAID(AIDS[a].bytes, AIDS[a].len, fci, fciLen);
     if (!fciLen) {
       sResult(id, false, "Sin AID", millis() - t0);
       return;
     }
-    uint8_t gpo[256];
-    uint8_t gpoLen = 0;
+    uint8_t gpo[EMV_RESP_CAP];
+    uint16_t gpoLen = 0;
     getProcessingOptions(fci, fciLen, gpo, gpoLen, 100);
     int aipL = 0;
     uint8_t *aipP = EmvKernel::tlvFind(gpo, gpoLen - 2, 0x82, &aipL);
@@ -2278,20 +2335,20 @@ static void handleTest(WiFiClient &client, const String &id) {
       sResult(id, false, "Timeout tarjeta", millis() - t0);
       return;
     }
-    uint8_t resp[256];
-    uint8_t rLen = 0;
+    uint8_t resp[EMV_RESP_CAP];
+    uint16_t rLen = 0;
     selectPPSE(resp, rLen);
     rLen = 0;
-    uint8_t fci[256];
-    uint8_t fciLen = 0;
+    uint8_t fci[EMV_RESP_CAP];
+    uint16_t fciLen = 0;
     for (int a = 0; a < NUM_AIDS && !fciLen; a++)
       selectAID(AIDS[a].bytes, AIDS[a].len, fci, fciLen);
     if (!fciLen) {
       sResult(id, false, "Sin AID", millis() - t0);
       return;
     }
-    uint8_t gpo[256];
-    uint8_t gpoLen = 0;
+    uint8_t gpo[EMV_RESP_CAP];
+    uint16_t gpoLen = 0;
     getProcessingOptions(fci, fciLen, gpo, gpoLen, 100);
     // Buscar 9F6D (VISA CL limit), 9F6B (CTQ VISA), 9F66 (VISA TTQ en PDOL)
     char found[160] = "";
@@ -2345,12 +2402,12 @@ static void handleTest(WiFiClient &client, const String &id) {
     card.un[1] = (un >> 16) & 0xFF;
     card.un[2] = (un >> 8) & 0xFF;
     card.un[3] = un & 0xFF;
-    uint8_t resp[256];
-    uint8_t rLen = 0;
+    uint8_t resp[EMV_RESP_CAP];
+    uint16_t rLen = 0;
     selectPPSE(resp, rLen);
     rLen = 0;
-    uint8_t fci[256];
-    uint8_t fciLen = 0;
+    uint8_t fci[EMV_RESP_CAP];
+    uint16_t fciLen = 0;
     bool aidOk = false;
     for (int a = 0; a < NUM_AIDS && !aidOk; a++) {
       if (selectAID(AIDS[a].bytes, AIDS[a].len, fci, fciLen)) {
@@ -2363,8 +2420,8 @@ static void handleTest(WiFiClient &client, const String &id) {
       sResult(id, false, "Sin AID", millis() - t0);
       return;
     }
-    uint8_t gpo[256];
-    uint8_t gpoLen = 0;
+    uint8_t gpo[EMV_RESP_CAP];
+    uint16_t gpoLen = 0;
     getProcessingOptions(fci, fciLen, gpo, gpoLen, 500);
     // Read records for CDOL
     int aflL = 0;
@@ -2377,8 +2434,8 @@ static void handleTest(WiFiClient &client, const String &id) {
       for (int i = 0; i + 3 < aflL; i += 4) {
         uint8_t sfi = (aflP[i] >> 3), from = aflP[i + 1], to = aflP[i + 2];
         for (uint8_t r = from; r <= to; r++) {
-          uint8_t rr[256];
-          uint8_t rl = 0;
+          uint8_t rr[EMV_RESP_CAP];
+          uint16_t rl = 0;
           if (!readRecord(sfi, r, rr, rl))
             continue;
           if (!card.cdol1Len) {
@@ -2393,8 +2450,8 @@ static void handleTest(WiFiClient &client, const String &id) {
       }
     }
     // Send GENERATE AC with P1=0x00 (request AAC = offline decline)
-    uint8_t gen[256];
-    uint8_t genLen = 0;
+    uint8_t gen[EMV_RESP_CAP];
+    uint16_t genLen = 0;
     bool acOk = generateAC(500, gen, genLen, 0x00); // 0x00 = AAC
     if (acOk && genLen >= 3) {
       // Check tag 9F27 (Cryptogram Information Data)
@@ -3638,13 +3695,14 @@ bool emvyCommand(const char *verb, char *args) {
       return true;
     }
     uint8_t resp[264];
-    uint8_t rlen = 0;
-    if (nfc.raw().readerTagCmd(apdu, (uint8_t)alen, resp, &rlen)) {
+    uint8_t rlenFrag = 0;
+    if (nfc.raw().readerTagCmd(apdu, (uint8_t)alen, resp, &rlenFrag)) {
       gPassthroughActive =
           false; // fallo de transmisión: se asume tarjeta retirada
       Serial.println("ERR:TXFAIL");
       return true;
     }
+    uint16_t rlen = rlenFrag;
     drainNciFragments(resp, rlen);
     char out[600];
     HexUtils::toCompact(resp, rlen, out);

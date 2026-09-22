@@ -72,9 +72,27 @@ uint8_t *tlvFind(uint8_t *buf, int bufLen, uint16_t tag, int *outLen) {
 }
 
 void encodeAmount(uint64_t cents, uint8_t *out6) {
+  // EMV tag 9F02 "Amount, Authorised" es formato n12: 6 bytes en BCD
+  // empaquetado (dos dígitos decimales por byte), NO binario. Ej.: 500 →
+  // 00 00 00 00 05 00.
+  //
+  // Antes esto codificaba en binario (500 → 00 00 00 00 01 F4). Visa qVSDC
+  // nunca lo delata porque su criptograma llega directo en la respuesta al GPO
+  // y la tarjeta no corre gestión de riesgo sobre el monto; pero Mastercard
+  // M/Chip sí interpreta 9F02 como BCD durante su Card Risk Management en el
+  // GENERATE AC — un monto en binario contiene nibbles inválidos (A–F).
+  //
+  // Ésta fue la causa raíz confirmada en hardware (2026-09-22) del SW=6985 que
+  // hacía fallar `bombercat emvy read` con Mastercard mientras Visa funcionaba:
+  // con el monto en BCD la tarjeta acepta el GENERATE AC y devuelve
+  // ARQC/ATC/IAD reales. Detalle completo en
+  // bombercat-firmware/docs/MASTERCARD_READ_FIX_EMVYBOMBERCAT.md.
   for (int i = 5; i >= 0; i--) {
-    out6[i] = (uint8_t)(cents & 0xFF);
-    cents >>= 8;
+    uint8_t lo = (uint8_t)(cents % 10);
+    cents /= 10;
+    uint8_t hi = (uint8_t)(cents % 10);
+    cents /= 10;
+    out6[i] = (uint8_t)((hi << 4) | lo);
   }
 }
 
