@@ -10,6 +10,7 @@
 #include "TagReader.h"
 
 #include "Electroniccats_PN7150.h" // PROT_* protocol constants
+#include "HexUtils.h"
 
 namespace TagReader {
 
@@ -17,10 +18,15 @@ String hexCompact(const uint8_t *data, uint32_t numBytes) {
   if (numBytes == 0 || data == NULL) {
     return "-";
   }
-  char tmp[3];
+  // Same encoding as HexUtils::toCompact(); converted in fixed-size chunks so
+  // a long APDU payload never needs a len*2+1 scratch buffer on the RP2040.
+  const uint32_t kChunk = 16;
+  char tmp[kChunk * 2 + 1];
   String hex;
-  for (uint32_t i = 0; i < numBytes; i++) {
-    sprintf(tmp, "%02X", data[i] & 0xFF);
+  hex.reserve(numBytes * 2);
+  for (uint32_t i = 0; i < numBytes; i += kChunk) {
+    uint32_t n = numBytes - i < kChunk ? numBytes - i : kChunk;
+    HexUtils::toCompact(data + i, n, tmp);
     hex += tmp;
   }
   return hex;
