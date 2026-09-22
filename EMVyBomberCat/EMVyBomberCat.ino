@@ -293,7 +293,11 @@ static uint32_t hwRand32() {
 // también se movió al kernel (ver más abajo, GET PROCESSING OPTIONS).
 
 static void drainNciFragments(uint8_t *resp, uint8_t &respLen) {
-  for (int frag = 0; frag < 16 && respLen < 252; frag++) {
+  // Tope subido de 252 a 255 (máx. representable en respLen/uint8_t): con
+  // 252 el primer fragmento de un registro grande de Mastercard (p. ej.
+  // SFI=6 con ~253 bytes) ya llegaba por encima del tope y este bucle no
+  // llegaba ni a intentar leer la continuación de la cadena.
+  for (int frag = 0; frag < 16 && respLen < 255; frag++) {
     delay(10);
     if (!nfc.raw().hasMessage())
       break;
@@ -333,11 +337,38 @@ static bool apduExchange(uint8_t *cmd, uint8_t cmdLen, uint8_t *resp,
     delay(20);
     respLen = 0;
     bool err = nfc.raw().readerTagCmd(cmd, cmdLen, resp, &respLen);
-    if (err) {
-      // readerTagCmd() ya copia lo que haya en rxBuffer aunque marque error
-      // (timeout total vs. una notificación NCI en vez del DATA_PACKET dan
-      // el mismo "err", pero con contenido distinto en resp/respLen) — lo
-      // mostramos para poder distinguir el caso real la próxima vez.
+    // readerTagCmd() marca "err" tanto en un timeout real como cuando el
+    // PRIMER fragmento de una respuesta encadenada (NCI PBF=1) no trae el
+    // header 00 00 que espera — y en ambos casos ya copió en resp/respLen
+    // lo que tenía en rxBuffer. El segundo caso es habitual en Mastercard
+    // M/Chip: registros grandes (p. ej. el certificado de clave pública
+    // del emisor, SFI=6) no entran en un solo fragmento NCI, algo que Visa
+    // qVSDC no sufre porque manda el criptograma directo en el GPO (sin
+    // READ RECORD). Por eso drenamos el resto de la cadena SIEMPRE, haya
+    // marcado error o no, y decidimos éxito/fallo por el SW final real en
+    // vez de confiar en el flag de readerTagCmd(). Si no se drena aquí, el
+    // FIFO I2C queda con bytes pendientes y desincroniza el comando
+    // siguiente (por eso fallaban también las lecturas y el GENERATE AC
+    // posteriores, no solo este registro).
+    drainNciFragments(resp, respLen);
+    if (respLen < 2) {
+      if (err) {
+        size_t showLen = (respLen < 8) ? respLen : 8;
+        char hx[24];
+        HexUtils::toCompact(resp, showLen, hx);
+        char eb[90];
+        snprintf(eb, sizeof(eb), "# APDU ERR: %s (len=%u data=%s)", label,
+                 (unsigned)respLen, hx);
+        Serial.println(eb);
+        break;
+      }
+      Serial.println("# APDU short resp");
+      continue;
+    }
+    uint8_t sw1 = resp[respLen - 2], sw2 = resp[respLen - 1];
+    if (err && sw1 != 0x90 && sw1 != 0x61) {
+      // No era una cadena recuperable: error real (timeout, tarjeta
+      // retirada, notificación NCI inesperada, etc.)
       size_t showLen = (respLen < 8) ? respLen : 8;
       char hx[24];
       HexUtils::toCompact(resp, showLen, hx);
@@ -347,12 +378,6 @@ static bool apduExchange(uint8_t *cmd, uint8_t cmdLen, uint8_t *resp,
       Serial.println(eb);
       break;
     }
-    drainNciFragments(resp, respLen);
-    if (respLen < 2) {
-      Serial.println("# APDU short resp");
-      continue;
-    }
-    uint8_t sw1 = resp[respLen - 2], sw2 = resp[respLen - 1];
     // SW=61xx: tarjeta tiene más datos — emitir GET RESPONSE
     if (sw1 == 0x61 && sw2 > 0) {
       uint8_t gr[] = {0x00, 0xC0, 0x00, 0x00, sw2};
