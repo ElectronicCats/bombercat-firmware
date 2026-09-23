@@ -817,14 +817,41 @@ static bool runEmvFlowOnce(uint64_t amountCents) {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// drainAndRearm — teardown seguro tras un flujo EMV / detección de tag
+// ---------------------------------------------------------------------------
+// Sustituye al patrón waitForTagRemoval() + stopDiscovery() + startDiscovery().
+// waitForTagRemoval() de la librería hace un presence-check ISO-DEP en bucle
+// SIN timeout: si la tarjeta sigue acoplada al campo cuando termina el flujo
+// (típico en lecturas consecutivas: la Mastercard aún sobre la antena tras el
+// GENERATE AC), loop() queda atascado ahí, el discovery no se re-arma y el
+// plano de control (USB-CDC: ping/info/REBOOT) deja de atenderse hasta un
+// replug físico ("wedge tras lectura", Finding 2).
+//
+// Aquí la espera de retirada es ACOTADA: cede tiempo a control.poll() en cada
+// vuelta (mantiene vivo el USB-CDC) y se rinde tras maxMs. No hace falta
+// esperar la retirada real — stopDiscovery()/startDiscovery() resetea el estado
+// RF del PN7150, así que una tarjeta que siga en el campo simplemente se
+// re-detecta en el siguiente comando en vez de colgar el REPL.
+static void drainAndRearm(unsigned long maxMs = 1500) {
+  unsigned long t = millis();
+  while (millis() - t < maxMs) {
+    control.poll(); // atiende ping/info/identify durante la espera
+    // isTagDetected() acotado (150 ms): sale en cuanto no quedan notificaciones
+    // de tag pendientes, sin el bucle infinito de waitForTagRemoval().
+    if (!nfc.raw().isTagDetected(150))
+      break;
+  }
+  nfc.raw().stopDiscovery();
+  nfc.raw().startDiscovery();
+}
+
 // Wrapper con hasta 3 intentos: re-init NFC y re-detección entre intentos
 static bool runEmvFlow(uint64_t amountCents) {
   for (int attempt = 0; attempt < 3; attempt++) {
     if (attempt > 0) {
       SLOGF("# Reintento EMV %d/3...", attempt + 1);
-      nfc.raw().waitForTagRemoval();
-      nfc.raw().stopDiscovery();
-      nfc.raw().startDiscovery();
+      drainAndRearm();
       // Esperar re-detección de la tarjeta (máx 6s)
       unsigned long tw = millis();
       bool found = false;
@@ -870,11 +897,7 @@ static bool pollCard(unsigned long timeoutMs = 20000) {
   return false;
 }
 
-static void releaseCard() {
-  nfc.raw().waitForTagRemoval();
-  nfc.raw().stopDiscovery();
-  nfc.raw().startDiscovery();
-}
+static void releaseCard() { drainAndRearm(); }
 
 // ---------------------------------------------------------------------------
 // buildWebJson para /scan
@@ -1598,9 +1621,7 @@ static void handleTest(WiFiClient &client, const String &id) {
     snprintf(detail, sizeof(detail), "Tag detectado: %s (proto=0x%02X)", proto,
              p);
     SLOGF("Protocolo: %s", proto);
-    nfc.raw().waitForTagRemoval();
-    nfc.raw().stopDiscovery();
-    nfc.raw().startDiscovery();
+    drainAndRearm();
 
   } else if (id == "nfc_iso") {
     unsigned long tw = millis();
@@ -1626,9 +1647,7 @@ static void handleTest(WiFiClient &client, const String &id) {
       snprintf(detail, sizeof(detail),
                "Tag no es ISO-DEP (proto=%d) — no es tarjeta de pago",
                nfc.raw().remoteDevice.getProtocol());
-    nfc.raw().waitForTagRemoval();
-    nfc.raw().stopDiscovery();
-    nfc.raw().startDiscovery();
+    drainAndRearm();
 
     // =========================================================
     // CARD IDENTIFICATION
@@ -2135,9 +2154,7 @@ static void handleTest(WiFiClient &client, const String &id) {
     for (int i = 0; i < 3; i++) {
       if (i > 0) {
         // Reiniciar descubrimiento y esperar re-deteccion
-        nfc.raw().waitForTagRemoval();
-        nfc.raw().stopDiscovery();
-        nfc.raw().startDiscovery();
+        drainAndRearm();
         unsigned long tw = millis();
         bool ref = false;
         while (millis() - tw < 8000) {
@@ -2615,9 +2632,7 @@ static void handleClient(WiFiClient &client) {
       } else {
         sendJson(client, "{\"ok\":false,\"error\":\"Flujo EMV fallo\"}");
       }
-      nfc.raw().waitForTagRemoval();
-      nfc.raw().stopDiscovery();
-      nfc.raw().startDiscovery();
+      drainAndRearm();
       Serial.println("# Listo.");
     }
 
@@ -3739,9 +3754,7 @@ bool emvyCommand(const char *verb, char *args) {
       return true;
     }
     gPassthroughActive = false;
-    nfc.raw().waitForTagRemoval();
-    nfc.raw().stopDiscovery();
-    nfc.raw().startDiscovery();
+    drainAndRearm();
     Serial.println("OK");
     return true;
   }
@@ -3872,15 +3885,11 @@ bool emvyCommand(const char *verb, char *args) {
     Serial.println("JSON_START");
     Serial.println(webResult);
     Serial.println("JSON_END");
-    nfc.raw().waitForTagRemoval();
-    nfc.raw().stopDiscovery();
-    nfc.raw().startDiscovery();
+    drainAndRearm();
     Serial.println("# Listo.");
   } else {
     Serial.println("# ERROR: Flujo EMV fallo — ver log");
-    nfc.raw().waitForTagRemoval();
-    nfc.raw().stopDiscovery();
-    nfc.raw().startDiscovery();
+    drainAndRearm();
   }
   return true;
 }
