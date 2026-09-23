@@ -40,6 +40,18 @@
  * desde la pestaña Lectores, EMVy puede leer,
  * escribir (Escritura) y hacer el dump completo de la tarjeta igual que con
  * cualquier otro lector. Ver `firmware/EMVyBomberCat/README.md`.
+ *
+ * Créditos
+ * --------
+ * Firmware EMVy contribuido originalmente por
+ * [Glitchboi-sudo](https://github.com/Glitchboi-sudo) en
+ * https://github.com/ElectronicCats/bombercat-firmware/pull/4. A partir de esa
+ * contribución se adaptó para seguir el mismo core y los mismos patrones
+ * arquitectónicos que ya usan los demás firmwares de este repositorio
+ * (`core/src/NfcController` como único punto de acceso al PN7150,
+ * `core/src/BomberCatControl` para el REPL ping/info/identify del Discovery
+ * Contract, y `core/src/EmvKernel` para la lógica EMV compartida) en vez de
+ * reimplementar esas piezas de forma aislada.
  */
 
 #include "emv_emu.h" // struct DolItem (ver nota en el header sobre por qué)
