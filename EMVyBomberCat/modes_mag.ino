@@ -3,10 +3,10 @@
 // serie (`MAG:<track1>|<track2>`) en vez de por el botón físico.
 // Pines del BomberCat: PIN_A=6, PIN_B=7 (bobina H-bridge).
 
-#define EMVY_MAG_PIN_A      6
-#define EMVY_MAG_PIN_B      7
-#define EMVY_MAG_CLOCK_US   500   // ~velocidad de swipe
-#define EMVY_MAG_BETWEEN    53    // ceros entre track1 y track2
+#define EMVY_MAG_PIN_A 6
+#define EMVY_MAG_PIN_B 7
+#define EMVY_MAG_CLOCK_US 500 // ~velocidad de swipe
+#define EMVY_MAG_BETWEEN 53   // ceros entre track1 y track2
 
 static char _magTracks[2][128];
 static char _magRev[41];
@@ -49,7 +49,8 @@ static void _magStoreRev(int track) {
     }
     crc ? (_magRev[i] |= 1 << 4) : (_magRev[i] &= ~(1 << 4));
   }
-  tmp = lrc; crc = 1;
+  tmp = lrc;
+  crc = 1;
   for (int j = 0; j < _magBitlen[track] - 1; j++) {
     crc ^= tmp & 1;
     (tmp & 1) ? (_magRev[i] |= 1 << j) : (_magRev[i] &= ~(1 << j));
@@ -76,7 +77,8 @@ static void _magPlay(int track) {
   int tmp, crc, lrc = 0;
   _magDir = 0;
   track--;
-  for (int i = 0; i < 25; i++) _magBit(0);          // ceros iniciales
+  for (int i = 0; i < 25; i++)
+    _magBit(0); // ceros iniciales
   for (int i = 0; _magTracks[track][i] != '\0'; i++) {
     crc = 1;
     tmp = _magTracks[track][i] - _magSublen[track];
@@ -88,30 +90,41 @@ static void _magPlay(int track) {
     }
     _magBit(crc);
   }
-  tmp = lrc; crc = 1;                                 // LRC
+  tmp = lrc;
+  crc = 1; // LRC
   for (int j = 0; j < _magBitlen[track] - 1; j++) {
     crc ^= tmp & 1;
     _magBit(tmp & 1);
     tmp >>= 1;
   }
   _magBit(crc);
-  if (track == 0) {                                   // track1 -> track2 en reversa
-    for (int i = 0; i < EMVY_MAG_BETWEEN; i++) _magBit(0);
+  if (track == 0) { // track1 -> track2 en reversa
+    for (int i = 0; i < EMVY_MAG_BETWEEN; i++)
+      _magBit(0);
     _magReverse(2);
   }
-  for (int i = 0; i < 25; i++) _magBit(0);            // ceros finales
+  for (int i = 0; i < 25; i++)
+    _magBit(0); // ceros finales
   digitalWrite(EMVY_MAG_PIN_A, LOW);
   digitalWrite(EMVY_MAG_PIN_B, LOW);
 }
 
-// Emite un swipe. `track1`/`track2` pueden venir con o sin centinelas (%..? ;..?).
+// Emite un swipe. `track1`/`track2` pueden venir con o sin centinelas (%..?
+// ;..?).
 void emvyMagPlay(const char *track1, const char *track2) {
   _magTracks[0][0] = '\0';
   _magTracks[1][0] = '\0';
-  if (track1 && track1[0]) { strncpy(_magTracks[0], track1, 127); _magTracks[0][127] = '\0'; }
-  if (track2 && track2[0]) { strncpy(_magTracks[1], track2, 127); _magTracks[1][127] = '\0'; }
+  if (track1 && track1[0]) {
+    strncpy(_magTracks[0], track1, 127);
+    _magTracks[0][127] = '\0';
+  }
+  if (track2 && track2[0]) {
+    strncpy(_magTracks[1], track2, 127);
+    _magTracks[1][127] = '\0';
+  }
   if (_magTracks[0][0]) {
-    if (_magTracks[1][0]) _magStoreRev(2);           // necesario para el reverse
+    if (_magTracks[1][0])
+      _magStoreRev(2); // necesario para el reverse
     _magPlay(1);
   } else if (_magTracks[1][0]) {
     _magPlay(2);
