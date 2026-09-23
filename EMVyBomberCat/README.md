@@ -8,7 +8,7 @@ todo manejable por **serie** desde EMVyController.
 
 | Comando serie              | Modo   | Qué hace                                              |
 |----------------------------|--------|------------------------------------------------------|
-| `ping` / `info` / `identify` | control | Descubrimiento (Discovery Contract) → `+OK bombercat` / `:fw_name…+OK` / `+OK`+LED |
+| `ping` / `info` / `identify` | control | Descubrimiento (`BomberCatControl`, core) → `+OK bombercat` / `:fw_name…+OK` / `+OK`+LED |
 | `SCAN <centavos>`          | EMV    | Flujo EMV contactless → `JSON_START/…/JSON_END`      |
 | `WAIT [ms]`                | APDU   | Espera tarjeta ISO-DEP (`READY:` / `ERR:NOCARD`)     |
 | `APDU:<hex>` / `RELEASE`   | APDU   | Passthrough de APDU (`RESP:<hex+SW>`)                |
@@ -61,38 +61,46 @@ Todos aceptan `--port /dev/ttyACMx` para fijar el puerto si hay más de un dispo
 
 ## Discovery Contract (plano de control conforme)
 
-Este firmware implementa el **BomberCatControl Discovery Contract v1.0**
-(`docs/BomberCatControl-Discovery-Contract.md`, normativo) en su **plano de control**,
-para que cualquier host conforme —el CLI de `bombercat-tools`, la GUI y la TUI de EMVy—
-lo descubra e identifique de forma **idéntica**:
+Desde la **Fase 2** de la integración con `core/`, el plano de control (`ping`/`info`/
+`identify`/verbo-desconocido) ya no lo implementa este sketch: lo sirve
+`core/src/BomberCatControl` (el mismo REPL de `MifareClassic`/`DetectTags`/…), para que
+cualquier host conforme —el CLI de `bombercat-tools`, la GUI y la TUI de EMVy— descubra e
+identifique la placa de forma **idéntica** al resto del monorepo:
 
 | Estímulo (host→device) | Respuesta (device→host)                    | Cláusula |
 |------------------------|--------------------------------------------|----------|
 | `ping` (o `PING`/`Ping`) | `+OK bombercat`  (sin data lines)        | §5, C-6/C-7 |
-| `info`                 | `:fw_name emvybombercat` · `:fw <v>` · `:role emv-multitool` · `+OK` | §6.1, C-8 |
+| `info`                 | `:fw` · `:fw_name emvybombercat` · `:state <idle\|scanning\|emulating\|hw-error>` · `+OK` | §6.1, C-8 |
 | `identify`             | `+OK` inmediato + parpadeo de LED asíncrono (~2 s) | §6.2, C-9 |
 | `<verbo desconocido>`  | `-ERR unknown command <verb>`              | §6.3.3, C-11 |
 
-- El verbo es **case-insensitive** (el dispatcher compara en mayúsculas), así que
-  `ping`/`PING`/`Ping` producen la misma respuesta (§5.1) — esto reconcilia el `PING`
-  (mayúsculas) del reader de EMVy con el `ping` (minúsculas) del CLI del vendor.
+- El verbo es **case-insensitive** (`BomberCatControl::dispatch` lo compara ignorando
+  mayúsculas), así que `ping`/`PING`/`Ping` producen la misma respuesta (§5.1) — esto
+  reconcilia el `PING` (mayúsculas) del reader de EMVy con el `ping` (minúsculas) del CLI
+  del vendor. Es un fix en `core/`, no algo específico de este sketch.
 - El parpadeo de `identify` **no bloquea** el plano de control: la respuesta `+OK` sale
-  al instante y el LED se bombea desde `loop()` (`identifyPump`, §6.2.1).
+  al instante y el LED (`LED_BUILTIN`, ~2 s / toggle cada 150 ms) lo bombea `core` desde
+  `control.poll()` (§6.2.1) — EMVy no necesita un `identifyPump()` propio.
+- `:state` reemplaza al antiguo `:role emv-multitool` (divergencia ya corregida).
+- **Fase 5.** El acceso al PN7150 pasa por `NfcController` (`core/`), cerrando la doble ruta
+  al chip; un fallo de bring-up de NFC o de WiFi ya no cuelga el firmware en `while(true)` —
+  el plano de control se levanta *antes* del bring-up de hardware, así que `ping`/`info`
+  siguen respondiendo y `:state` reporta `hw-error` en vez de dejar la placa muda.
 
 **Desviación conocida (transitoria).** Los verbos **operativos** (`WAIT`/`APDU:`→`RESP:`,
 `SCAN`→`JSON_*`, `EMU:`/`EMUEMV`→`EMU:*`, `MAG:`/`RELEASE`/`STOP`→`OK`) conservan el
 **dialecto histórico** en vez del framing `+OK`/`-ERR` del contrato (§2.7/§3), por
-retrocompatibilidad con `emvy/readers/bombercat.py`, que aún habla ese dialecto. Migrarlos
-al framing del contrato es **Fase 2** y depende de que el host se actualice primero (PR en
-curso). El descubrimiento (ping/info/identify/verbo-desconocido) —lo que hace que la placa
-aparezca con ✓ en `device list`— ya es conforme.
+retrocompatibilidad con `emvy/readers/bombercat.py`, que aún habla ese dialecto — los
+atiende el hook `emvyCommand()` (`BomberCatControl::Callbacks::command`). Migrarlos al
+framing del contrato depende de que el host se actualice primero y queda pendiente de
+decisión de equipo. El descubrimiento (ping/info/identify/verbo-desconocido) —lo que hace
+que la placa aparezca con ✓ en `device list`— ya es conforme.
 
 ## Estructura (sketch multi-archivo — Arduino concatena los .ino)
 
 - `EMVyBomberCat.ino` — base: lector EMV + passthrough + servidor web + dispatcher serie.
-- `modes_tags.ino`    — modo TAGS (reusa el objeto `nfc` PN7150).
+- `modes_tags.ino`    — modo TAGS (reusa el objeto global `nfc`, `NfcController` desde la Fase 5).
 - `modes_mag.ino`     — modo MAG (magspoof, pines A=6/B=7).
-- `certs.h`           — certificados del servidor web (del lector original).
 
 ## Compilar y flashear
 
@@ -105,27 +113,32 @@ aparezca con ✓ en `device list`— ya es conforme.
 ### Opción A — Arduino IDE
 Abre `EMVyBomberCat.ino`, selecciona la placa BomberCat, y sube (Upload).
 
-### Opción B — arduino-cli
+### Opción B — script del repo (flujo oficial)
+Como con cualquier otro firmware de este monorepo, la imagen oficial se compila y flashea
+como `.uf2` (BOOTSEL) con el script en la raíz del repo:
 ```sh
-./build.sh            # compila (y opcionalmente sube con: ./build.sh upload)
+../flash_bombercat.sh -f EMVyBomberCat        # compila y sube
+../flash_bombercat.sh -f EMVyBomberCat -c     # solo compila (no sube)
 ```
-También desde la TUI de EMVy: pestaña **BomberCat** → elige el sketch → **Compilar** /
-**Compilar y subir (picotool)**.
 
-> **Importante**: esta placa sube por **picotool** (`bombercat.upload.tool=picotool`; reset a
-> 1200-bps + carga directa del `.elf`/`.bin` vía `arduino-cli upload`), **no** por `.uf2`. El
-> flasheo `.uf2` (BOOTSEL + copiar a `RPI-RP2`) es el que usa `bombercat-tools` para las imágenes
-> **oficiales** prebuilt (NFCGate, magspoof…) — no para tu propio firmware compilado aquí.
+### Opción C — TUI de EMVy (compilación local del usuario)
+Pestaña **BomberCat** → elige el sketch → **Compilar** / **Compilar y subir (picotool)**. Este
+flujo sube por **picotool** (`bombercat.upload.tool=picotool`; reset a 1200-bps + carga directa
+del `.elf`/`.bin` vía `arduino-cli upload`) en vez de `.uf2`, y es el que usa quien compila su
+propio firmware localmente desde la TUI de EMVyController — no es el flujo de las imágenes
+oficiales del repo (esas van por `.uf2`/BOOTSEL, ver Opción B).
 
-**Permisos USB (Linux)**: picotool/`arduino-cli upload` necesitan acceso crudo al dispositivo RP2040
-en modo BOOTSEL (`idVendor=2e8a`). Sin una regla `udev`, falla con *"No accessible RP2040 devices...
-try sudo or check your permissions"* aunque el touch-reset a 1200-bps sí funcione. Arréglalo una vez:
+**Permisos USB (Linux) para picotool**: picotool/`arduino-cli upload` necesitan acceso crudo al
+dispositivo RP2040 en modo BOOTSEL (`idVendor=2e8a`). Sin una regla `udev`, falla con *"No
+accessible RP2040 devices... try sudo or check your permissions"* aunque el touch-reset a
+1200-bps sí funcione. Arréglalo una vez:
 ```sh
 echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="2e8a", MODE="0666"' | sudo tee /etc/udev/rules.d/99-pico.rules
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 **Alternativa sin permisos**: convierte el `.elf` a `.uf2` con la herramienta del paquete de la placa
-y cópialo a la unidad `RPI-RP2` montada (funciona siempre, sin udev ni sudo):
+y cópialo a la unidad `RPI-RP2` montada (funciona siempre, sin udev ni sudo — es lo que hace
+`flash_bombercat.sh` de la Opción B):
 ```sh
 ELF2UF2=$(find ~/.arduino15 -iname elf2uf2 | head -1)
 "$ELF2UF2" build/EMVyBomberCat.ino.elf build/EMVyBomberCat.ino.uf2
