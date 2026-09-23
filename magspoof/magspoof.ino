@@ -29,6 +29,21 @@
 #include "NfcController.h"
 #include <MagStripe.h>
 
+// 1.2.6.0: `nfcread` now supports Mastercard PayPass. Two additions over the
+// Visa-only path: (1) it walks the GPO response's AFL (Application File
+// Locator) and READ RECORDs each SFI/record the card names, instead of only
+// guessing SFI1/rec1 (which answered 6A 82 "record not found" on Mastercard);
+// (2) it scans for tag 0x9F6B (Track 2 Data, Mastercard mag-stripe) as well as
+// 0x57 (Track 2 Equivalent Data, Visa/EMV). SFI1/rec1 stays as a last-resort
+// fallback for cards that expose no parseable AFL.
+//
+// 1.2.5.0: `nfcread` now SELECTs the AID the card advertises in its PPSE
+// (tag 0x4F) instead of a hardcoded Visa AID, so non-Visa cards (Mastercard,
+// Mercado Pago, Amex) get an application selected rather than being rejected
+// with 6A 82 and then failing every later APDU with 6D 00. AID/GPO responses
+// are now checked for 90 00 and hex-dumped at Warn on refusal, so `nfc read
+// -v` names the failing status word instead of only "track 2 not found".
+//
 // 1.2.4.0: `nfcread` now takes an optional [name] argument so a scan can
 // target a chosen card instead of always overwriting the active one -- an
 // existing name updates that card's Track 2, a new name creates it. Bumped
@@ -1006,6 +1021,14 @@ static uint8_t READ_GPO_DEFAULT[] = {0x80, 0xA8, 0x00, 0x00,
                                      0x02, 0x83, 0x00, 0x00};
 static uint8_t READ_RECORD_SFI1[] = {0x00, 0xB2, 0x01, 0x0C, 0x00};
 
+// SELECT-by-name (00 A4 04 00 Lc <AID..> 00) built at runtime from the AID the
+// card advertised in its PPSE (tag 0x4F). An EMV AID is 5..16 bytes, so 5-byte
+// header + 16 + 1-byte Le fits with room to spare. Selecting the card's own
+// AID (rather than a hardcoded Visa AID) is what lets a Mastercard/Mercado
+// Pago/Amex card get an application selected at all -- otherwise the hardcoded
+// Visa SELECT answers 6A 82 and every later APDU runs with no app selected.
+static uint8_t SELECT_AID[6 + 16 + 1];
+
 // GPO command built from the card's declared PDOL by treatPDOL(); kept as a
 // global buffer (like hunterCatNFC_AllOne.ino's `ppdol`) since its length is
 // dynamic, set by treatPDOL()'s return value rather than sizeof().
@@ -1082,29 +1105,114 @@ static uint8_t treatPDOL(uint8_t *apdu) {
   return plen;
 }
 
-// Read a physical EMV/Visa card's Track 2 Equivalent Data (tag 0x57) over
-// NFC-A/ISO-DEP: PPSE SELECT -> VISA AID SELECT -> GPO (PDOL-aware) -> READ
-// RECORD SFI=1. Ported from hunterCatNFC_AllOne.ino:234-293 (seekTrack2()),
-// dropping its serial debug prints and its infinite 4-command retry loop (a
-// single attempt here; the caller decides whether to retry). Assumes a tag
-// is already in the field (call nfc.waitForTag() first) and the PN7150 is
-// in reader mode. Returns the packed length (same BCD-nibble format
-// buildVisaTrack2Record() emits, Phase 3) written to `out`, or 0 on any
-// transceive failure, a malformed/truncated PDOL, or a missing tag 0x57.
-// Scan a raw APDU response `data`/`len` for EMV tag 0x57 (Track 2 Equivalent
-// Data) and copy its value into `out` (capacity `outCap`). Returns the tag's
-// length on a fit, 0 if the tag isn't present, or 0xFF if it's present but
-// longer than `outCap` (safe sentinel: a real Track 2 Equivalent Data value
-// never approaches 255 bytes).
+// Read a physical EMV card's Track 2 over NFC-A/ISO-DEP, supporting both Visa
+// and Mastercard: PPSE SELECT -> SELECT the AID the card advertises (tag 0x4F)
+// -> GPO (PDOL-aware) -> find Track 2 inline in the GPO response, else walk the
+// GPO's AFL and READ RECORD each listed SFI/record, else fall back to the fixed
+// SFI1/rec1 guess. Track 2 is accepted from tag 0x57 (Visa/EMV) or 0x9F6B
+// (Mastercard mag-stripe). Grown from a Visa-only port of
+// hunterCatNFC_AllOne.ino:234-293 (seekTrack2()); a single attempt here (the
+// caller decides whether to retry). Assumes a tag is already in the field
+// (call nfc.waitForTag() first) and the PN7150 is in reader mode. Returns the
+// packed length (same BCD-nibble format buildVisaTrack2Record() emits, Phase 3)
+// written to `out`, or 0 on any transceive failure, a refused SELECT/GPO, a
+// malformed/truncated PDOL, or Track 2 being nowhere the flow reached.
+// Scan a raw APDU response `data`/`len` for the card's Track 2 in either EMV
+// encoding and copy its value into `out` (capacity `outCap`): tag 0x57 (Track
+// 2 Equivalent Data, used by Visa/EMV) or the two-byte tag 0x9F6B (Track 2
+// Data, used by Mastercard PayPass mag-stripe records). Both hold the same
+// nibble-packed BCD Track 2 that unpackTrack2Equivalent() decodes. Returns the
+// value length on a fit, 0 if neither tag is present, or 0xFF if one is
+// present but longer than `outCap` (safe sentinel: a real Track 2 value never
+// approaches 255 bytes).
 static uint8_t findTrack2Tag(const uint8_t *data, uint8_t len, uint8_t *out,
                              uint8_t outCap) {
   for (uint8_t u = 0; u + 1 < len; u++) {
-    uint8_t tagLen = data[u + 1];
-    if (data[u] == 0x57 && u + 2 + tagLen <= len) {
-      if (tagLen > outCap)
-        return 0xFF;
-      memcpy(out, &data[u + 2], tagLen);
-      return tagLen;
+    // Single-byte tag 0x57.
+    if (data[u] == 0x57) {
+      uint8_t tagLen = data[u + 1];
+      if (u + 2 + tagLen <= len) {
+        if (tagLen > outCap)
+          return 0xFF;
+        memcpy(out, &data[u + 2], tagLen);
+        return tagLen;
+      }
+    }
+    // Two-byte tag 0x9F 0x6B.
+    if (data[u] == 0x9F && data[u + 1] == 0x6B && u + 2 < len) {
+      uint8_t tagLen = data[u + 2];
+      if (u + 3 + tagLen <= len) {
+        if (tagLen > outCap)
+          return 0xFF;
+        memcpy(out, &data[u + 3], tagLen);
+        return tagLen;
+      }
+    }
+  }
+  return 0;
+}
+
+// Scan a PPSE FCI response for the first ADF AID (tag 0x4F) and build a
+// SELECT-by-name APDU for it in SELECT_AID. Returns the command length, or 0
+// if the PPSE listed no usable 0x4F (malformed response, or a card that only
+// exposes an MSD directory). Mirrors findTrack2Tag()'s linear byte scan rather
+// than a full nested-TLV walk, which is enough to pull the AID out of the
+// 6F/A5/BF0C/61/4F nesting the PPSE FCI always uses.
+static uint8_t buildAidSelect(const uint8_t *ppse, uint8_t len) {
+  for (uint8_t u = 0; u + 1 < len; u++) {
+    uint8_t aidLen = ppse[u + 1];
+    if (ppse[u] == 0x4F && aidLen >= 5 && aidLen <= 16 &&
+        u + 2 + aidLen <= len) {
+      SELECT_AID[0] = 0x00;
+      SELECT_AID[1] = 0xA4;
+      SELECT_AID[2] = 0x04;
+      SELECT_AID[3] = 0x00;
+      SELECT_AID[4] = aidLen;
+      memcpy(&SELECT_AID[5], &ppse[u + 2], aidLen);
+      SELECT_AID[5 + aidLen] = 0x00; // Le
+      return 6 + aidLen;
+    }
+  }
+  return 0;
+}
+
+// True if an APDU response ends in the success status word 90 00. A response
+// shorter than 2 bytes (or any other SW) is a failure the caller should log.
+static bool apduOk(const uint8_t *resp, uint8_t len) {
+  return len >= 2 && resp[len - 2] == 0x90 && resp[len - 1] == 0x00;
+}
+
+// Locate the AFL (Application File Locator) inside a GPO response. Format 1
+// (outer tag 0x80) concatenates AIP(2 bytes) + AFL with no inner tags, so the
+// AFL is that value minus its first 2 bytes; Format 2 (outer tag 0x77) instead
+// carries the AFL as its own tag 0x94 TLV. Copies the AFL bytes into `out`
+// (capacity `outCap`) so the caller can walk it after the shared `resp` buffer
+// is overwritten by the READ RECORDs it drives. Returns the AFL length (a
+// multiple of 4), or 0 if none was found. Mirrors findTrack2Tag()'s linear
+// byte scan rather than a full TLV walk, enough for the flat GPO templates.
+static uint8_t findAfl(const uint8_t *data, uint8_t len, uint8_t *out,
+                       uint8_t outCap) {
+  for (uint8_t u = 0; u + 1 < len; u++) {
+    // Format 1: 80 LL <AIP AIP> <AFL...>
+    if (data[u] == 0x80) {
+      uint8_t vlen = data[u + 1];
+      if (vlen >= 6 && u + 2 + vlen <= len) {
+        uint8_t aflLen = vlen - 2; // drop the 2-byte AIP
+        if (aflLen > outCap)
+          aflLen = outCap;
+        memcpy(out, &data[u + 4], aflLen);
+        return aflLen - (aflLen % 4);
+      }
+    }
+    // Format 2: 94 LL <AFL...>
+    if (data[u] == 0x94) {
+      uint8_t aflLen = data[u + 1];
+      if (aflLen >= 4 && u + 2 + aflLen <= len) {
+        if (aflLen > outCap)
+          aflLen = outCap;
+        memcpy(out, &data[u + 2], aflLen);
+        return aflLen - (aflLen % 4);
+      }
     }
   }
   return 0;
@@ -1119,10 +1227,34 @@ static uint8_t readVisaTrack2(uint8_t *out, uint8_t outCap) {
     return 0;
   }
 
-  if (!nfc.readerTransceive(READ_VISA_AID, sizeof(READ_VISA_AID), resp,
-                            &respLen)) {
-    LOG_WARN("nfcread: VISA AID SELECT got no response (PPSE didn't list "
-             "the VISA AID, or the card dropped out of the field)");
+  // Select the AID the card actually advertised in its PPSE, not a hardcoded
+  // one: a non-Visa card (Mastercard, Mercado Pago, Amex...) rejects the
+  // hardcoded Visa AID with 6A 82, and then GPO/READ RECORD run against a card
+  // with no application selected and answer 6D 00. Fall back to the Visa AID
+  // only if the PPSE carried no parseable 0x4F.
+  uint8_t *aidCmd = READ_VISA_AID;
+  uint8_t aidCmdLen = sizeof(READ_VISA_AID);
+  uint8_t aidSelLen = buildAidSelect(resp, respLen);
+  if (aidSelLen != 0) {
+    aidCmd = SELECT_AID;
+    aidCmdLen = aidSelLen;
+  } else {
+    LOG_WARN("nfcread: PPSE listed no AID (tag 0x4F); trying the hardcoded "
+             "VISA AID as a last resort");
+  }
+
+  if (!nfc.readerTransceive(aidCmd, aidCmdLen, resp, &respLen)) {
+    LOG_WARN("nfcread: AID SELECT got no response (card dropped out of the "
+             "field)");
+    return 0;
+  }
+  if (!apduOk(resp, respLen)) {
+    // The card refused the application. Dumping the SW here is what turns a
+    // silent 6D-00-later into a clear diagnosis (e.g. 6A 82 = the AID isn't on
+    // this card).
+    LOG_WARN("nfcread: AID SELECT was refused by the card (not 90 00) - the "
+             "selected application is not present");
+    Log::hex(LogLevel::Warn, "nfcread: AID SELECT response", resp, respLen);
     return 0;
   }
 
@@ -1151,6 +1283,12 @@ static uint8_t readVisaTrack2(uint8_t *out, uint8_t outCap) {
              "PDOL values, or dropped out of the field)");
     return 0;
   }
+  if (!apduOk(resp, respLen)) {
+    LOG_WARN("nfcread: GPO was refused by the card (not 90 00) - the "
+             "synthesized PDOL values were not accepted");
+    Log::hex(LogLevel::Warn, "nfcread: GPO response", resp, respLen);
+    return 0;
+  }
 
   // A GPO response comes in one of two EMV formats: Format 1 (outer tag
   // 0x80) carries only the AIP + AFL, telling the terminal which SFI/record
@@ -1163,15 +1301,48 @@ static uint8_t readVisaTrack2(uint8_t *out, uint8_t outCap) {
   // exist) and the card answers 6A 83 "record not found".
   uint8_t gpoTagLen = findTrack2Tag(resp, respLen, out, outCap);
   if (gpoTagLen == 0xFF) {
-    LOG_WARN("nfcread: tag 0x57 (Track 2 Equivalent Data) found in the GPO "
-             "response but too long for the read buffer");
+    LOG_WARN("nfcread: Track 2 tag (0x57/0x9F6B) inline in the GPO response "
+             "but too long for the read buffer");
     return 0;
   }
   if (gpoTagLen != 0)
     return gpoTagLen;
 
-  // Format 1 (or a Format 2 card that simply didn't inline it): fall back to
-  // the SFI1/record1 guess.
+  // Format 1 (Mastercard PayPass, and any card that didn't inline Track 2):
+  // the GPO response carries an AFL naming which SFI/records actually hold the
+  // data. Walk it and READ RECORD each entry, scanning for tag 0x57 (Visa/EMV)
+  // or 0x9F6B (Mastercard mag-stripe). Copy the AFL out of `resp` first, since
+  // the READ RECORDs below overwrite it. An AFL entry is 4 bytes:
+  // (SFI<<3) | firstRecord | lastRecord | #records-for-offline-auth.
+  uint8_t afl[64];
+  uint8_t aflLen = findAfl(resp, respLen, afl, sizeof(afl));
+  for (uint8_t e = 0; e + 3 < aflLen; e += 4) {
+    uint8_t sfi = afl[e] >> 3;
+    if (sfi == 0 || sfi == 31) // 0 and 31 are reserved, never real records
+      continue;
+    uint8_t firstRec = afl[e + 1];
+    uint8_t lastRec = afl[e + 2];
+    // uint16_t counter so a lastRec of 0xFF can't wrap the loop forever.
+    for (uint16_t rec = firstRec; rec != 0 && rec <= lastRec; rec++) {
+      uint8_t cmd[5] = {0x00, 0xB2, (uint8_t)rec, (uint8_t)((sfi << 3) | 0x04),
+                        0x00};
+      if (!nfc.readerTransceive(cmd, sizeof(cmd), resp, &respLen))
+        continue;
+      if (!apduOk(resp, respLen))
+        continue;
+      uint8_t recTagLen = findTrack2Tag(resp, respLen, out, outCap);
+      if (recTagLen == 0xFF) {
+        LOG_WARN("nfcread: Track 2 tag found in an AFL record but too long "
+                 "for the read buffer");
+        return 0;
+      }
+      if (recTagLen != 0)
+        return recTagLen;
+    }
+  }
+
+  // Last resort: the fixed SFI1/record1 guess, for a card that gives no
+  // parseable AFL but still parks Track 2 there.
   if (!nfc.readerTransceive(READ_RECORD_SFI1, sizeof(READ_RECORD_SFI1), resp,
                             &respLen)) {
     LOG_WARN("nfcread: READ RECORD (SFI 1, rec 1) got no response");
@@ -1180,21 +1351,19 @@ static uint8_t readVisaTrack2(uint8_t *out, uint8_t outCap) {
 
   uint8_t recTagLen = findTrack2Tag(resp, respLen, out, outCap);
   if (recTagLen == 0xFF) {
-    LOG_WARN("nfcread: tag 0x57 (Track 2 Equivalent Data) found but too "
-             "long for the read buffer");
+    LOG_WARN("nfcread: Track 2 tag found in SFI1/rec1 but too long for the "
+             "read buffer");
     return 0;
   }
   if (recTagLen != 0)
     return recTagLen;
 
-  LOG_WARN("nfcread: neither the GPO response nor READ RECORD (SFI 1, rec 1) "
-           "carried tag 0x57 (Track 2 Equivalent Data) - this card may keep "
-           "it in a different SFI/record, or has no MSD/qVSDC fallback at "
-           "all");
+  LOG_WARN("nfcread: no Track 2 tag (0x57 or 0x9F6B) in the GPO response, any "
+           "AFL-listed record, or SFI1/rec1 - this card has no MSD/qVSDC "
+           "Track 2, or keeps it somewhere none of those reached");
   // The last two bytes are the APDU status word (90 00 = success; e.g.
   // 6A 83 = "record not found").
-  Log::hex(LogLevel::Warn, "nfcread: READ RECORD (SFI1 rec1) response", resp,
-           respLen);
+  Log::hex(LogLevel::Warn, "nfcread: last READ RECORD response", resp, respLen);
   return 0;
 }
 
