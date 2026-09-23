@@ -650,7 +650,17 @@ static bool runEmvFlowOnce(uint64_t amountCents) {
   bool aidOk = false;
   if (ppseAidLen > 0 && selectAID(ppseAid, ppseAidLen, fci, fciLen)) {
     HexUtils::toCompact(ppseAid, ppseAidLen, card.aidHex);
-    strncpy(card.aidName, "DISC", sizeof(card.aidName) - 1);
+    // El AID que anuncia el PPSE suele traer el PIX completo; resolvemos el
+    // nombre por prefijo (RID+PIX) contra la tabla en vez de asumir una marca.
+    const char *aidName = "DISC";
+    for (int a = 0; a < NUM_AIDS; a++) {
+      if (ppseAidLen >= AIDS[a].len &&
+          memcmp(ppseAid, AIDS[a].bytes, AIDS[a].len) == 0) {
+        aidName = AIDS[a].name;
+        break;
+      }
+    }
+    strncpy(card.aidName, aidName, sizeof(card.aidName) - 1);
     aidOk = true;
   }
   for (int a = 0; a < NUM_AIDS && !aidOk; a++) {
