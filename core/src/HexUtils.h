@@ -23,16 +23,6 @@ String toString(const uint8_t *data, size_t len);
 // Prefer this on the hot path to keep RAM pressure low on the RP2040.
 void print(Print &out, const uint8_t *data, size_t len);
 
-// Decodes a hex string (upper/lowercase, spaces ignored) into `out`. Stops at
-// the first invalid nibble, an unpaired trailing nibble, or once `maxLen`
-// bytes have been written. Returns the number of bytes decoded.
-size_t decode(const char *hex, uint8_t *out, size_t maxLen);
-
-// Compact uppercase hex with no "0x"/separators, e.g. "1A2B3C". Writes
-// len*2 hex digits plus a terminating '\0' into `out`, which the caller must
-// size accordingly (at least len*2 + 1 bytes).
-void toCompact(const uint8_t *data, size_t len, char *out);
-
 } // namespace HexUtils
 
 #endif // BOMBERCAT_CORE_HEXUTILS_H

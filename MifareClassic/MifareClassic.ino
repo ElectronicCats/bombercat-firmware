@@ -37,7 +37,6 @@
 #include <BomberCatControl.h>
 #include <HexUtils.h>
 #include <NfcController.h>
-#include <TagReader.h>
 
 #include "MifareClassic.h"
 #include "MifareCommands.h"
@@ -90,9 +89,11 @@ static const uint32_t MIFARE_REMOVAL_PROBE_INTERVAL_MS = 500; // vendor cadence
 static const uint16_t MIFARE_REMOVAL_PROBE_TIMEOUT_MS =
     200; // bounded reselect wait
 
-// Function prototypes.
-// hexCompact()/protocolName()/TagReader::emitTagEvent(Serial, ) now come from
-// BomberCatCore's TagReader (shared with DetectTags / DetectReaders).
+// Function prototypes
+String getHexCompact(const byte *data, const uint32_t numBytes);
+const char *getProtocolName(unsigned char protocol);
+void emitTagEvent(uint32_t tsMs, const char *tech, const char *protocol,
+                  const String &uidHex);
 void emitMifareEvent(uint32_t tsMs, const String &uidHex, uint8_t blockNum,
                      const uint8_t *data, uint8_t dataLen, const char *status);
 void probeMifareBlock(uint32_t tsMs, const String &uidHex);
@@ -161,16 +162,16 @@ void handleTagDetected() {
   tagSessionActive = true;
   const uint32_t tsMs = millis();
   const unsigned char protocol = nfc.raw().remoteDevice.getProtocol();
-  const char *protocolName = TagReader::protocolName(protocol);
+  const char *protocolName = getProtocolName(protocol);
   const bool isMifare = protocol == nfc.raw().protocol.MIFARE;
 
   if (isMifare) {
     Serial.println(" - Found MIFARE card");
-    String uidHex = TagReader::hexCompact(nfc.raw().remoteDevice.getNFCID(),
-                                          nfc.raw().remoteDevice.getNFCIDLen());
+    String uidHex = getHexCompact(nfc.raw().remoteDevice.getNFCID(),
+                                  nfc.raw().remoteDevice.getNFCIDLen());
     Serial.print("\tUID = ");
     Serial.println(uidHex);
-    TagReader::emitTagEvent(Serial, tsMs, "NFC-A", protocolName, uidHex);
+    emitTagEvent(tsMs, "NFC-A", protocolName, uidHex);
     probeMifareBlock(tsMs, uidHex);
   } else {
     Serial.print(" - Found a card, but it is not Mifare Classic (protocol=");
@@ -232,6 +233,58 @@ void pollCardRemoval() {
   mifareCardAuthed = false; // next card starts from a clean, un-authed session
 }
 
+// Compact uppercase hex with no "0x"/separators, e.g. "041A2B3C" - the
+// :tag wire format's uid_hex field (see modules/tags/parser.py
+// TagParser._hex_compact in bombercat-tools).
+String getHexCompact(const byte *data, const uint32_t numBytes) {
+  if (numBytes == 0 || data == NULL) {
+    return "-";
+  }
+  char tmp[3];
+  String hex;
+  for (uint32_t i = 0; i < numBytes; i++) {
+    sprintf(tmp, "%02X", data[i] & 0xFF);
+    hex += tmp;
+  }
+  return hex;
+}
+
+const char *getProtocolName(unsigned char protocol) {
+  const Protocol &proto = nfc.raw().protocol;
+  switch (protocol) {
+  case proto.T1T:
+    return "T1T";
+  case proto.T2T:
+    return "T2T";
+  case proto.T3T:
+    return "T3T";
+  case proto.ISODEP:
+    return "ISODEP";
+  case proto.NFCDEP:
+    return "NFCDEP";
+  case proto.ISO15693:
+    return "ISO15693";
+  case proto.MIFARE:
+    return "MIFARE";
+  default:
+    return "UNKNOWN";
+  }
+}
+
+// Structured event consumed by bombercat-tools' TagParser (same conventions
+// as DetectTags.ino's emitTagEvent).
+void emitTagEvent(uint32_t tsMs, const char *tech, const char *protocol,
+                  const String &uidHex) {
+  Serial.print(":tag ");
+  Serial.print(tsMs);
+  Serial.print(' ');
+  Serial.print(tech);
+  Serial.print(' ');
+  Serial.print(protocol);
+  Serial.print(' ');
+  Serial.println(uidHex);
+}
+
 // Control-plane state reported by `info`.
 const char *controlState() {
   return tagSessionActive ? "tag-detected" : "scanning";
@@ -250,7 +303,7 @@ void emitMifareEvent(uint32_t tsMs, const String &uidHex, uint8_t blockNum,
   Serial.print(' ');
   Serial.print(blockNum);
   Serial.print(' ');
-  Serial.print(dataLen > 0 ? TagReader::hexCompact(data, dataLen) : "-");
+  Serial.print(dataLen > 0 ? getHexCompact(data, dataLen) : "-");
   Serial.print(' ');
   Serial.println(status);
 }
@@ -440,8 +493,7 @@ void handleMifareRead(char *args) {
     replyErr("read failed (not authenticated, or card gone)");
     return;
   }
-  replyKv("mifare_data",
-          String(blockNum) + " " + TagReader::hexCompact(data, dataLen));
+  replyKv("mifare_data", String(blockNum) + " " + getHexCompact(data, dataLen));
   replyOk();
 }
 
@@ -501,8 +553,7 @@ void handleMifareSector(char *args) {
     return;
   }
   mifareCardAuthed = true; // sector auth left an open session; tear down next
-  replyKv("mifare_sector",
-          TagReader::hexCompact(sectorData, sizeof(sectorData)));
+  replyKv("mifare_sector", getHexCompact(sectorData, sizeof(sectorData)));
   replyOk();
 }
 
@@ -515,14 +566,11 @@ void handleMifareSector(char *args) {
 // ConfigStore) is not implemented yet.
 void emitKnownKeys() {
   replyKv("mifare_key0",
-          String("default_ff ") +
-              TagReader::hexCompact(MIFARE_DEFAULT_KEY_FFFFFF, 6));
+          String("default_ff ") + getHexCompact(MIFARE_DEFAULT_KEY_FFFFFF, 6));
   replyKv("mifare_key1",
-          String("default_00 ") +
-              TagReader::hexCompact(MIFARE_DEFAULT_KEY_000000, 6));
-  replyKv("mifare_key2",
-          String("default_a0a1a2 ") +
-              TagReader::hexCompact(MIFARE_DEFAULT_KEY_A0A1A2A3A4A5, 6));
+          String("default_00 ") + getHexCompact(MIFARE_DEFAULT_KEY_000000, 6));
+  replyKv("mifare_key2", String("default_a0a1a2 ") +
+                             getHexCompact(MIFARE_DEFAULT_KEY_A0A1A2A3A4A5, 6));
   replyOk();
 }
 

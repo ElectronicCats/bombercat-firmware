@@ -12,8 +12,6 @@
 #   ./flash_bombercat.sh -l              # lista los firmwares disponibles
 #   ./flash_bombercat.sh --setup         # solo instala/prepara toolchain (core + libs)
 #   ./flash_bombercat.sh -p /dev/ttyACM0 # fuerza un puerto en vez de autodetectar
-#   ./flash_bombercat.sh -f NFCGate -u ~/builds          # genera ~/builds/NFCGate.uf2 (sin flashear)
-#   ./flash_bombercat.sh -f NFCGate -u fw.uf2 --flash    # genera el .uf2 y además flashea
 #
 # Opciones:
 #   -f, --firmware <nombre>  Nombre del sketch a flashear (carpeta en la raíz del repo)
@@ -21,9 +19,6 @@
 #   -m, --monitor            Abre el monitor serie tras flashear
 #   -l, --list               Lista los firmwares disponibles y termina
 #   -c, --compile-only       Solo compila, no sube al dispositivo
-#   -u, --uf2 <ruta>         Genera el .uf2 en <ruta> (archivo o directorio) y NO flashea.
-#                            Si <ruta> es un directorio se usa <ruta>/<firmware>.uf2
-#       --flash              Flashea además de generar el .uf2 (solo útil junto con -u)
 #       --setup              Instala/actualiza core y librerías y termina
 #   -y, --yes                No pide confirmación
 #   -h, --help               Muestra esta ayuda
@@ -187,8 +182,6 @@ DO_LIST=0
 COMPILE_ONLY=0
 SETUP_ONLY=0
 ASSUME_YES=0
-UF2_OUT=""        # ruta destino del .uf2 pedida con -u/--uf2 (vacío = no generar)
-DO_FLASH=0        # con -u, flashear también si se pasa --flash
 
 usage() { awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "${BASH_SOURCE[0]}"; }
 
@@ -199,25 +192,12 @@ while [[ $# -gt 0 ]]; do
     -m|--monitor)      DO_MONITOR=1; shift ;;
     -l|--list)         DO_LIST=1; shift ;;
     -c|--compile-only) COMPILE_ONLY=1; shift ;;
-    -u|--uf2)          UF2_OUT="${2:-}"
-                       [[ -n "$UF2_OUT" ]] \
-                         || die "-u/--uf2 necesita una ruta (archivo .uf2 o directorio destino)."
-                       shift 2 ;;
-    --flash)           DO_FLASH=1; shift ;;
     --setup)           SETUP_ONLY=1; shift ;;
     -y|--yes)          ASSUME_YES=1; shift ;;
     -h|--help)         usage; exit 0 ;;
     *) die "Opción desconocida: $1 (usa -h para ayuda)" ;;
   esac
 done
-
-# Validación de combinaciones
-if [[ $DO_FLASH -eq 1 && $COMPILE_ONLY -eq 1 ]]; then
-  die "--flash y -c/--compile-only son incompatibles."
-fi
-if [[ $DO_FLASH -eq 1 && -z "$UF2_OUT" ]]; then
-  warn "--flash es redundante sin -u/--uf2 (sin -u ya se flashea por defecto)."
-fi
 
 # --------------------------------------------------------------------------- #
 # Firmwares disponibles (carpetas con un .ino del mismo nombre)
@@ -431,23 +411,6 @@ make_uf2() {
     || die "Falló la conversión .elf → .uf2 con elf2uf2."
 }
 
-# Normaliza la ruta pedida con -u/--uf2 y prepara su directorio.
-#   - directorio existente (o terminado en /) -> <dir>/<firmware>.uf2
-#   - ruta sin extensión                      -> se le añade .uf2
-# Devuelve la ruta absoluta del archivo destino.
-resolve_uf2_out() {
-  local out="$1" dir base
-  if [[ -d "$out" || "$out" == */ ]]; then
-    out="${out%/}/$FIRMWARE.uf2"
-  fi
-  [[ "$out" == *.uf2 ]] || out+=".uf2"
-  dir="$(dirname "$out")"
-  base="$(basename "$out")"
-  mkdir -p "$dir" || die "No se pudo crear el directorio destino: $dir"
-  dir="$(cd "$dir" && pwd)" || die "No se pudo acceder al directorio destino: $dir"
-  echo "$dir/$base"
-}
-
 # Flashea copiando el .uf2 a la unidad del bootloader.
 flash_uf2() {
   local uf2="$1" mnt="$2"
@@ -493,16 +456,12 @@ choose_firmware() {
 banner
 
 # Número total de pasos para los indicadores [n/N].
-# Base: arduino-cli + core + librerías.
-STEP_TOTAL=3
-if [[ $SETUP_ONLY -eq 0 ]]; then
-  STEP_TOTAL=$((STEP_TOTAL + 1))                       # compilar
-  if [[ -n "$UF2_OUT" ]]; then
-    STEP_TOTAL=$((STEP_TOTAL + 1))                     # generar el .uf2
-  fi
-  if [[ $COMPILE_ONLY -eq 0 && ( -z "$UF2_OUT" || $DO_FLASH -eq 1 ) ]]; then
-    STEP_TOTAL=$((STEP_TOTAL + 1))                     # flashear
-  fi
+if [[ $SETUP_ONLY -eq 1 ]]; then
+  STEP_TOTAL=3
+elif [[ $COMPILE_ONLY -eq 1 ]]; then
+  STEP_TOTAL=4
+else
+  STEP_TOTAL=5
 fi
 
 step "Comprobando arduino-cli";  ensure_arduino_cli
@@ -538,33 +497,13 @@ COMPILE_ARGS=(--fqbn "$FQBN" --output-dir "$BUILD_DIR")
 arduino-cli compile "${COMPILE_ARGS[@]}" "$SKETCH_DIR"
 ok "Compilación correcta."
 
-# Localizar el .elf generado (el core no produce .uf2 directamente)
-ELF_FILE="$(find "$BUILD_DIR" -maxdepth 1 -name '*.elf' | head -n1)"
-
-# Exportar el .uf2 a la ruta pedida con -u/--uf2 (antes de cualquier flasheo,
-# para que el archivo quede guardado aunque el flasheo se cancele o falle).
-UF2_SAVED=""
-if [[ -n "$UF2_OUT" ]]; then
-  step "Generando el .uf2"
-  [[ -n "$ELF_FILE" ]] || die "No se encontró el .elf compilado en $BUILD_DIR."
-  UF2_SAVED="$(resolve_uf2_out "$UF2_OUT")"
-  info "Convirtiendo firmware a UF2..."
-  make_uf2 "$ELF_FILE" "$UF2_SAVED"
-  ok "UF2 generado: $C_BLD$UF2_SAVED$C_RST"
-  info "Para flashearlo a mano: pon el BomberCat en modo bootloader (doble reset)"
-  info "y copia el archivo a la unidad RPI-RP2."
-fi
-
 if [[ $COMPILE_ONLY -eq 1 ]]; then
   ok "Solo compilación solicitada. Listo."
   exit 0
 fi
 
-# Con -u/--uf2 no se flashea salvo que se pida explícitamente con --flash.
-if [[ -n "$UF2_OUT" && $DO_FLASH -eq 0 ]]; then
-  ok "No se flashea (añade --flash si además quieres subirlo al BomberCat)."
-  exit 0
-fi
+# Localizar el .elf generado (el core no produce .uf2 directamente)
+ELF_FILE="$(find "$BUILD_DIR" -maxdepth 1 -name '*.elf' | head -n1)"
 
 # Elegir método de flasheo:
 #   - Si el usuario forzó -p, usar ese puerto serie.
@@ -584,14 +523,9 @@ if [[ -n "$UF2_MOUNT" ]]; then
   ok "BomberCat en modo bootloader detectado: $UF2_MOUNT"
   [[ -n "$ELF_FILE" ]] || die "No se encontró el .elf compilado en $BUILD_DIR."
   confirm "¿Flashear '$FIRMWARE' por UF2 en $UF2_MOUNT?" || die "Cancelado por el usuario."
-  if [[ -n "$UF2_SAVED" ]]; then
-    # Ya se generó en la ruta pedida con -u/--uf2: se reutiliza.
-    UF2_FILE="$UF2_SAVED"
-  else
-    UF2_FILE="$BUILD_DIR/$FIRMWARE.uf2"
-    info "Convirtiendo firmware a UF2..."
-    make_uf2 "$ELF_FILE" "$UF2_FILE"
-  fi
+  UF2_FILE="$BUILD_DIR/$FIRMWARE.uf2"
+  info "Convirtiendo firmware a UF2..."
+  make_uf2 "$ELF_FILE" "$UF2_FILE"
   flash_uf2 "$UF2_FILE" "$UF2_MOUNT"
   ok "Firmware '$FIRMWARE' flasheado por UF2. La placa se reiniciará sola."
 elif [[ -n "$PORT" ]]; then

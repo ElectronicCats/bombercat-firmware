@@ -5,7 +5,6 @@
  */
 #include "BomberCatControl.h"
 
-#include <ctype.h>
 #include <string.h>
 
 static const uint32_t IDENTIFY_DURATION_MS = 2000;
@@ -88,33 +87,20 @@ static char *splitVerb(char *line) {
   return p;
 }
 
-// Case-insensitive verb match (the discovery handshake accepts "ping",
-// "PING", "Ping", ... identically; only the three built-in verbs are folded
-// here, never the sketch-provided command's own verb).
-static bool verbIs(const char *verb, const char *canonical) {
-  while (*verb && *canonical) {
-    if (tolower((unsigned char)*verb) != tolower((unsigned char)*canonical))
-      return false;
-    verb++;
-    canonical++;
-  }
-  return *verb == '\0' && *canonical == '\0';
-}
-
 void BomberCatControl::dispatch(char *line) {
   while (*line == ' ')
     line++;
   char *verb = line;
   char *args = splitVerb(line);
 
-  if (verbIs(verb, "ping")) {
+  if (strcmp(verb, "ping") == 0) {
     ok("bombercat");
-  } else if (verbIs(verb, "info")) {
+  } else if (strcmp(verb, "info") == 0) {
     kv("fw", _fw);
     kv("fw_name", _name);
     kv("state", _cb.state != nullptr ? _cb.state() : "idle");
     ok();
-  } else if (verbIs(verb, "identify")) {
+  } else if (strcmp(verb, "identify") == 0) {
     if (_cb.identify != nullptr) {
       _cb.identify();
     } else {
@@ -123,8 +109,7 @@ void BomberCatControl::dispatch(char *line) {
     ok();
   } else {
     if (_cb.command == nullptr || !_cb.command(verb, args)) {
-      _io.print("-ERR unknown command ");
-      _io.println(verb);
+      err("unknown command");
     }
   }
 }

@@ -12,11 +12,7 @@
  *   identify  -> +OK  (+ LED blink)       (bombercat identify)
  *   <other>   -> dispatched to the sketch-provided Callbacks::command hook, if
  *                any (the sketch must emit its own +OK/-ERR terminator); if the
- *                hook is null or returns false, -ERR unknown command <verb>
- *
- * ping/info/identify are matched case-insensitively ("ping"/"PING"/"Ping" all
- * hit the same branch); the verb handed to Callbacks::command is NOT case-
- * folded, so a sketch's own verbs keep whatever casing the caller sent.
+ *                hook is null or returns false, -ERR unknown command
  *
  * Unlike core/src/SerialControl.h this class has NO dependency on ConfigStore /
  * RelayEngine / NfcGateLink, so any sketch can add it without pulling in the

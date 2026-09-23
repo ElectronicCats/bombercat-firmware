@@ -29,7 +29,6 @@
 #include "Electroniccats_PN7150.h"
 #include "arduino_secrets.h"
 #include <FlashIAPBlockDevice.h>
-#include <MagStripe.h>
 #include <PubSubClient.h>
 #include <SPI.h>
 #include <SerialCommand.h>
@@ -134,18 +133,17 @@ char clientId[] = "BomberCatClient-##";
 
 int msflag = 0;
 
-// Live track store filled from the host's magstripe payload; the F2F engine now
-// lives in BomberCatCore's MagStripe (classic waveform), shared with the other
-// MagSpoof sketches instead of a per-sketch copy.
+// consts get stored in ram as we don't adjust them
 char tracks[2][128];
 
-unsigned int curTrack = 0;
+char revTrack[41];
 
-// Classic MagSpoof F2F engine, shared via BomberCatCore. Defaults to BomberCat
-// wiring (PIN_A=6, PIN_B=7, NPIN=5, LED_BUILTIN, 500us clock, 25 leading zeros
-// + track-1 -> track-2-reverse pass) - byte-identical to the previous inline
-// engine (revTrack/sublen/bitlen/dir + playBit/playTrack/reverseTrack).
-MagStripe stripe(MagStripe::classic());
+const int sublen[] = {32, 48, 48};
+
+const int bitlen[] = {7, 5, 5};
+
+unsigned int curTrack = 0;
+int dir;
 
 WiFiClient espClient;
 int status = WL_IDLE_STATUS;
@@ -208,16 +206,126 @@ int setSketchStats(const char *key, SketchStats stats) {
 /*****************
        MAGSPOOF
  *****************/
-// Trigger glue only: the F2F engine (playBit/playTrack/reverseTrack/
-// storeRevTrack) now lives in BomberCatCore's MagStripe (see `stripe` above).
-// Alternates track 1 and track 2 on each host magstripe payload, exactly as the
-// inline engine did.
+// send a single bit out
+void playBit(int sendBit) {
+  dir ^= 1;
+  digitalWrite(PIN_A, dir);
+  digitalWrite(PIN_B, !dir);
+  delayMicroseconds(CLOCK_US);
+
+  if (sendBit) {
+    dir ^= 1;
+    digitalWrite(PIN_A, dir);
+    digitalWrite(PIN_B, !dir);
+  }
+  delayMicroseconds(CLOCK_US);
+}
+
+// when reversing
+void reverseTrack(int track) {
+  int i = 0;
+  track--; // index 0
+  dir = 0;
+
+  while (revTrack[i++] != '?')
+    ;
+  i--;
+  while (i--)
+    for (int j = bitlen[track] - 1; j >= 0; j--)
+      playBit((revTrack[i] >> j) & 1);
+}
+
+// plays out a full track, calculating CRCs and LRC
+void playTrack(int track) {
+  int tmp = 0, crc = 0, lrc = 0;
+  dir = 0;
+  track--; // index 0
+
+  // First put out a bunch of leading zeros.
+  for (int i = 0; i < 25; i++)
+    playBit(0);
+
+  for (int i = 0; tracks[track][i] != '\0'; i++) {
+    crc = 1;
+    tmp = tracks[track][i] - sublen[track];
+
+    for (int j = 0; j < bitlen[track] - 1; j++) {
+      crc ^= tmp & 1;
+      lrc ^= (tmp & 1) << j;
+      playBit(tmp & 1);
+      tmp >>= 1;
+    }
+    playBit(crc);
+  }
+
+  // finish calculating and send last "byte" (LRC)
+  tmp = lrc;
+  crc = 1;
+  for (int j = 0; j < bitlen[track] - 1; j++) {
+    crc ^= tmp & 1;
+    playBit(tmp & 1);
+    tmp >>= 1;
+  }
+  playBit(crc);
+
+  // if track 1, play 2nd track in reverse (like swiping back?)
+  if (track == 0) {
+    // if track 1, also play track 2 in reverse
+    // zeros in between
+    for (int i = 0; i < BETWEEN_ZERO; i++)
+      playBit(0);
+
+    // send second track in reverse
+    reverseTrack(2);
+  }
+
+  // finish with 0's
+  for (int i = 0; i < 5 * 5; i++)
+    playBit(0);
+
+  digitalWrite(PIN_A, LOW);
+  digitalWrite(PIN_B, LOW);
+}
+
+// stores track for reverse usage later
+void storeRevTrack(int track) {
+  int i, tmp, crc, lrc = 0;
+  track--; // index 0
+  dir = 0;
+
+  for (i = 0; tracks[track][i] != '\0'; i++) {
+    crc = 1;
+    tmp = tracks[track][i] - sublen[track];
+
+    for (int j = 0; j < bitlen[track] - 1; j++) {
+      crc ^= tmp & 1;
+      lrc ^= (tmp & 1) << j;
+      tmp & 1 ? (revTrack[i] |= 1 << j) : (revTrack[i] &= ~(1 << j));
+      tmp >>= 1;
+    }
+    crc ? (revTrack[i] |= 1 << 4) : (revTrack[i] &= ~(1 << 4));
+  }
+
+  // finish calculating and send last "byte" (LRC)
+  tmp = lrc;
+  crc = 1;
+  for (int j = 0; j < bitlen[track] - 1; j++) {
+    crc ^= tmp & 1;
+    tmp & 1 ? (revTrack[i] |= 1 << j) : (revTrack[i] &= ~(1 << j));
+    tmp >>= 1;
+  }
+  crc ? (revTrack[i] |= 1 << 4) : (revTrack[i] &= ~(1 << 4));
+
+  i++;
+  revTrack[i] = '?';
+}
+
 void magspoof() {
   if (debug) {
     Serial.println("Activating MagSpoof...");
   }
 
-  stripe.playTrack(1 + (curTrack++ % 2), tracks);
+  playTrack(1 + (curTrack++ % 2));
   blink(L1, 150, 3);
   tiempo = -10000;
 }
@@ -1019,7 +1127,9 @@ void setup() {
   }
 
   pinMode(L1, OUTPUT);
-  stripe.begin(); // H-bridge / LED / button pin setup (MagStripe)
+  pinMode(PIN_A, OUTPUT);
+  pinMode(PIN_B, OUTPUT);
+  pinMode(NPIN, INPUT);
 
   resetMode();
 

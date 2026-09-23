@@ -30,7 +30,6 @@
 
 #include "Electroniccats_PN7150.h"
 #include <BomberCatControl.h>
-#include <TagReader.h>
 
 #define BOMBERCAT_FW_VERSION "1.2.0.0"
 
@@ -64,8 +63,9 @@ BomberCatControl control(Serial, BOMBERCAT_FW_VERSION, "detectreaders");
 
 static bool readerSessionActive = false; // drives control.state()
 
-// Function prototypes. hexCompact()/protocolName() now come from
-// BomberCatCore's TagReader (shared with DetectTags / MifareClassic).
+// Function prototypes
+String getHexCompact(const byte *data, const uint32_t numBytes);
+const char *getProtocolName(unsigned char protocol);
 const char *getListenTechName(unsigned char modeTech);
 const char *getInterfaceName(unsigned char interface);
 void emitReaderEvent(uint32_t tsMs, const char *tech, const char *protocol,
@@ -174,7 +174,7 @@ void handleReaderDetected() {
   const unsigned char protocol = nfc.remoteDevice.getProtocol();
   const unsigned char intf = nfc.remoteDevice.getInterface();
   const char *techName = getListenTechName(modeTech);
-  const char *protocolName = TagReader::protocolName(protocol);
+  const char *protocolName = getProtocolName(protocol);
   const char *interfaceName = getInterfaceName(intf);
 
   // Human-readable prose alongside the structured event: any line not
@@ -214,7 +214,7 @@ void handleReaderDetected() {
     apduCount++;
     Serial.print("\tAPDU[" + String(apduCount) + "/" + String(MAX_APDUS) +
                  "] = ");
-    Serial.println(TagReader::hexCompact(payload, payloadLen));
+    Serial.println(getHexCompact(payload, payloadLen));
 
     if (apduCount == 1) { // the first command drives the fingerprint
       memcpy(firstApdu, payload, payloadLen);
@@ -234,9 +234,8 @@ void handleReaderDetected() {
                           : "unknown";
 
   String extra = "intf=" + String(interfaceName);
-  extra += " apdu=" + (firstApduLen > 0
-                           ? TagReader::hexCompact(firstApdu, firstApduLen)
-                           : String("-"));
+  extra += " apdu=" + (firstApduLen > 0 ? getHexCompact(firstApdu, firstApduLen)
+                                        : String("-"));
   if (aidHex.length() > 0) {
     extra += " aid=" + aidHex;
   }
@@ -346,6 +345,43 @@ bool receiveApduBounded(byte *payload, uint8_t &payloadLen,
     // Any other notification (credits, etc.): drop and keep waiting.
   }
   return false; // deadline elapsed
+}
+
+// Compact uppercase hex with no "0x"/separators, e.g. "00A404000E..." - the
+// :reader wire format's apdu/aid fields (same conventions as DetectTags'
+// getHexCompact for :tag uid_hex). "-" means no data available.
+String getHexCompact(const byte *data, const uint32_t numBytes) {
+  if (numBytes == 0 || data == NULL) {
+    return "-";
+  }
+  char tmp[3];
+  String hex;
+  for (uint32_t i = 0; i < numBytes; i++) {
+    sprintf(tmp, "%02X", data[i] & 0xFF);
+    hex += tmp;
+  }
+  return hex;
+}
+
+const char *getProtocolName(unsigned char protocol) {
+  switch (protocol) {
+  case nfc.protocol.T1T:
+    return "T1T";
+  case nfc.protocol.T2T:
+    return "T2T";
+  case nfc.protocol.T3T:
+    return "T3T";
+  case nfc.protocol.ISODEP:
+    return "ISODEP";
+  case nfc.protocol.NFCDEP:
+    return "NFCDEP";
+  case nfc.protocol.ISO15693:
+    return "ISO15693";
+  case nfc.protocol.MIFARE:
+    return "MIFARE";
+  default:
+    return "UNKNOWN";
+  }
 }
 
 // Listen-side technology: getModeTech() is (MODE_LISTEN | techBits) in
@@ -462,7 +498,7 @@ const char *classifyFirstApdu(const byte *apdu, uint32_t len, String &aidHex) {
       n = 16; // AIDs are <= 16 bytes
     }
     if (n > 0) {
-      aidHex = TagReader::hexCompact(&apdu[5], n);
+      aidHex = getHexCompact(&apdu[5], n);
     }
   }
 
