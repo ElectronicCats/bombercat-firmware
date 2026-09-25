@@ -103,7 +103,7 @@ void pollCardRemoval();
 const char *controlState();
 bool bomberCatCommand(const char *verb, char *args);
 void handleMifareCommand(char *args);
-void mifareBeginAuth();
+bool mifareBeginAuth();
 void handleMifareAuth(char *args);
 void handleMifareRead(char *args);
 void handleMifareWrite(char *args);
@@ -195,7 +195,7 @@ void openMifareSession() {
   mifareSessionOpen = true;
   mifareSessionDeadline = millis() + MIFARE_SESSION_IDLE_MS;
   Serial.println("Card selected - use 'mifare auth/read/write/sector' "
-                 "commands (see MIFARE_CLASSIC_PLAN.md Sec.5).");
+                 "commands.");
 }
 
 // Start ending a card session: arm the non-blocking removal poll (see the
@@ -388,11 +388,20 @@ static void replyKv(const char *key, const String &value) {
 // session (the Key B == Key A duplication described at mifareCardAuthed). A
 // no-op when nothing is authenticated, so it costs a re-select only right
 // after a success, not on every probed key.
-void mifareBeginAuth() {
+// Returns false when the reselect proves the card has left the field (the
+// session is then ended and discovery re-armed), so a card removed while the
+// interactive session was still open is caught immediately instead of after a
+// full ~4 s dead transceive in mifareAuthenticate(). True when the card is
+// still present, or when there was nothing to reselect.
+bool mifareBeginAuth() {
   if (mifareCardAuthed) {
-    mifareReselect(nfc);
     mifareCardAuthed = false;
+    if (!mifareReselect(nfc)) {
+      beginCardRemovalWait(); // card left the field while the session was open
+      return false;
+    }
   }
+  return true;
 }
 
 // `mifare auth <block> <A|B> <key_hex12>` -> +OK / -ERR
@@ -409,18 +418,30 @@ void handleMifareAuth(char *args) {
   }
 
   uint8_t blockNum = (uint8_t)atoi(blockTok);
-  mifareBeginAuth(); // independent auth: never ride a prior success's session
+  // independent auth: never ride a prior success's session. Bails out early if
+  // the card is already gone (session ended inside mifareBeginAuth()).
+  if (!mifareBeginAuth()) {
+    replyErr("card removed, tap a card again");
+    return;
+  }
   if (mifareAuthenticate(nfc, blockNum, keyType, key)) {
     mifareCardAuthed = true; // session now open; tear down before the next auth
     replyOk();
   } else {
-    mifareCardAuthed = false; // the failure path re-selects below (clean card)
+    mifareCardAuthed = false;
     // A wrong key HALTs the card. Re-select it before answering so the host's
     // NEXT dictionary attempt starts clean — without this, one wrong key (e.g.
     // FFFFFFFFFFFF on a sector keyed A0A1A2A3A4A5) dooms the whole sweep and
-    // `mifare check` reports every key as failing. The interactive session
-    // stays open either way. See CLI_IMPROVEMENTS_MifareCheck.md §4.
-    mifareReselect(nfc);
+    // `mifare check` reports every key as failing. mifareReselect() returns
+    // false only when no card is in the field, which distinguishes a real
+    // wrong-key from a removed card: end the session and re-arm in that case so
+    // the host's next command correctly gets "no card selected" instead of a
+    // misleading auth failure. See CLI_IMPROVEMENTS_MifareCheck.md §4.
+    if (!mifareReselect(nfc)) {
+      beginCardRemovalWait();
+      replyErr("card removed, tap a card again");
+      return;
+    }
     replyErr("authentication failed");
   }
 }
@@ -481,13 +502,24 @@ void handleMifareSector(char *args) {
   uint8_t sectorNum = (uint8_t)atoi(sectorTok);
   uint8_t sectorData[MIFARE_BLOCKS_PER_SECTOR * MIFARE_BLOCK_SIZE];
   bool authOk = false;
-  mifareBeginAuth(); // independent auth: never ride a prior success's session
+  // independent auth: never ride a prior success's session. Bails out early if
+  // the card is already gone (session ended inside mifareBeginAuth()).
+  if (!mifareBeginAuth()) {
+    replyErr("card removed, tap a card again");
+    return;
+  }
   if (!mifareReadSector(nfc, sectorNum, keyType, key, sectorData, &authOk)) {
+    mifareCardAuthed = false;
     // A failed auth inside mifareReadSector HALTed the card; re-select so the
     // next self-contained command starts clean (same gotcha handleMifareAuth
-    // guards against).
-    mifareReselect(nfc);
-    mifareCardAuthed = false;
+    // guards against). mifareReselect() returning false means the card is gone,
+    // not a wrong key: end the session and re-arm instead of reporting a
+    // misleading auth failure.
+    if (!mifareReselect(nfc)) {
+      beginCardRemovalWait();
+      replyErr("card removed, tap a card again");
+      return;
+    }
     if (authOk) {
       // Key was right (auth succeeded) but a block read NAKed — the
       // sector's access bits don't permit reading with this key type, not
