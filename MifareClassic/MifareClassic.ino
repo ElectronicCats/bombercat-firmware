@@ -59,6 +59,78 @@ static const uint8_t *const MIFARE_PROBE_KEYS[] = {
     MIFARE_DEFAULT_KEY_A0A1A2A3A4A5};
 static const uint8_t MIFARE_PROBE_KEY_COUNT = 3;
 
+// Compact embedded default-key dictionary for the on-device `mifare check`
+// dictionary sweep (Plan de Implementación Firmware MIFARE, Fase 1). Ordered
+// *known-first*, mirroring the FRONT of the host's bundled dictionary
+// (bombercat-tools/.../data/mifare_default_keys.keys) so the per-slot early cut
+// resolves the same keys in the same order the host does: the card_1k
+// regression pin (attempts <= 66, 32/32 recovered — baseline_fase0_mifare/
+// baseline.json) relies on FFFF/A0A1/D3F7 sitting at indices 0/1/2. 32 keys x 6
+// bytes = 192 B in flash — restriction #3 (compact embedded dictionary, never a
+// full .dic dump). Grow the reachable key set through the persistent key-store
+// (`mifare keys`, Fase 3), not by expanding this table without measuring flash.
+static const uint8_t MIFARE_CHECK_DICT[][6] = {
+    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, // FFFFFFFFFFFF
+    {0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5}, // A0A1A2A3A4A5 (MAD)
+    {0xD3, 0xF7, 0xD3, 0xF7, 0xD3, 0xF7}, // D3F7D3F7D3F7 (NFC Forum)
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, // 000000000000
+    {0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5}, // B0B1B2B3B4B5
+    {0x4D, 0x3A, 0x99, 0xC3, 0x51, 0xDD}, // 4D3A99C351DD
+    {0x1A, 0x98, 0x2C, 0x7E, 0x45, 0x9A}, // 1A982C7E459A
+    {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF}, // AABBCCDDEEFF
+    {0x71, 0x4C, 0x5C, 0x88, 0x6E, 0x97}, // 714C5C886E97
+    {0x58, 0x7E, 0xE5, 0xF9, 0x35, 0x0F}, // 587EE5F9350F
+    {0xA0, 0x47, 0x8C, 0xC3, 0x90, 0x91}, // A0478CC39091
+    {0x53, 0x3C, 0xB6, 0xC7, 0x23, 0xF6}, // 533CB6C723F6
+    {0x8F, 0xD0, 0xA4, 0xF2, 0x56, 0xE9}, // 8FD0A4F256E9
+    {0xA6, 0x45, 0x98, 0xA7, 0x74, 0x78}, // A64598A77478
+    {0x26, 0x94, 0x0B, 0x21, 0xFF, 0x5D}, // 26940B21FF5D
+    {0xFC, 0x00, 0x01, 0x87, 0x78, 0xF7}, // FC00018778F7
+    {0x00, 0x00, 0x0F, 0xFE, 0x24, 0x88}, // 00000FFE2488
+    {0x5C, 0x59, 0x8C, 0x9C, 0x58, 0xB5}, // 5C598C9C58B5
+    {0xE4, 0xD2, 0x77, 0x0A, 0x89, 0xBE}, // E4D2770A89BE
+    {0x43, 0x4F, 0x4D, 0x4D, 0x4F, 0x41}, // 434F4D4D4F41
+    {0x43, 0x4F, 0x4D, 0x4D, 0x4F, 0x42}, // 434F4D4D4F42
+    {0x47, 0x52, 0x4F, 0x55, 0x50, 0x41}, // 47524F555041
+    {0x47, 0x52, 0x4F, 0x55, 0x50, 0x42}, // 47524F555042
+    {0x50, 0x52, 0x49, 0x56, 0x41, 0x41}, // 505249564141
+    {0x50, 0x52, 0x49, 0x56, 0x41, 0x42}, // 505249564142
+    {0x02, 0x97, 0x92, 0x7C, 0x0F, 0x77}, // 0297927C0F77
+    {0xEE, 0x00, 0x42, 0xF8, 0x88, 0x40}, // EE0042F88840
+    {0x72, 0x2B, 0xFC, 0xC5, 0x37, 0x5F}, // 722BFCC5375F
+    {0xF1, 0xD8, 0x3F, 0x96, 0x43, 0x14}, // F1D83F964314
+    {0x54, 0x72, 0x61, 0x76, 0x65, 0x6C}, // 54726176656C
+    {0x77, 0x69, 0x74, 0x68, 0x75, 0x73}, // 776974687573
+    {0x4A, 0xF9, 0xD7, 0xAD, 0xEB, 0xE4}, // 4AF9D7ADEBE4
+};
+static const uint8_t MIFARE_CHECK_DICT_COUNT =
+    sizeof(MIFARE_CHECK_DICT) / sizeof(MIFARE_CHECK_DICT[0]);
+
+// `mifare check` sweep bounds. Sectors default to a 1K card; the max matches
+// the host's `sector * 4` first-block mapping (1K = 16, 2K = 32 sectors — 4K's
+// 16-block sectors 32-39 are out of scope, same as the host CLI). The reuse
+// store and the --keys override are capped so both stay in bounded RAM.
+static const uint8_t MIFARE_CHECK_DEFAULT_SECTORS = 16;
+static const uint8_t MIFARE_CHECK_MAX_SECTORS = 32;
+static const uint8_t MIFARE_CHECK_MAX_KEYS = 64;  // --keys override cap
+static const uint8_t MIFARE_CHECK_KNOWN_MAX = 64; // confirmed-key reuse cap
+
+// Settle pause after a re-select inside the on-device sweep, before the next
+// authentication. The host-driven sweep never needs this: one `mifare auth`
+// per USB round-trip gives the PN7150 tens of ms of rest between attempts. The
+// on-device loop fires auth -> reselect -> auth back-to-back, and right after a
+// reset()+waitForTag() the chip is occasionally not ready for an immediate
+// auth, so the CORRECT key reads back as a failure once (observed on hardware:
+// a single sector's Key B dropped as a false hole ~1 run in N). This restores
+// that rest on the sweep path only (not in mifareReselect(), so the host path
+// keeps its speed). It does NOT count as an authentication, so the baseline
+// pin (attempts <= 66 on card_1k) is unaffected.
+static const uint8_t MIFARE_CHECK_SETTLE_MS = 5;
+
+// Per-slot sweep outcome (declared here, above the Arduino auto-generated
+// prototypes, so the functions returning it name a known type).
+enum SweepSlotResult { SLOT_FOUND, SLOT_NOT_FOUND, SLOT_CARD_REMOVED };
+
 // Interactive "mifare ..." REPL session over an already-selected Mifare
 // card. Closes (blocking wait-for-removal + re-arm discovery) after this
 // long without a "mifare ..." command, so a forgotten card doesn't wedge the
@@ -108,6 +180,7 @@ void handleMifareAuth(char *args);
 void handleMifareRead(char *args);
 void handleMifareWrite(char *args);
 void handleMifareSector(char *args);
+void handleMifareCheck(char *args);
 void emitKnownKeys();
 
 void setup() {
@@ -558,12 +631,242 @@ void emitKnownKeys() {
   replyOk();
 }
 
-// `mifare <auth|read|write|sector|keys> ...` dispatch. `keys` needs no card;
-// the rest require an open session (Decision 5) - see the file header.
+// --- `mifare check` on-device dictionary sweep (Fase 1) --------------------
+//
+// Repatriates into the device the sector x key x {A,B} sweep the host CLI used
+// to drive one `mifare auth` USB round-trip at a time (check.py). Same result,
+// same authentication count against the card (restriction #2: no extra RF
+// traffic — only the USB-serial + host-parse layer is removed); it just runs
+// the loop locally and streams the consolidated result. Stays strictly within
+// the PN7150 ceiling: only standard authentication with known keys, never any
+// key deduction (restriction #1).
+
+static bool keyEquals(const uint8_t *a, const uint8_t *b) {
+  return memcmp(a, b, 6) == 0;
+}
+
+static bool keyInSet(const uint8_t set[][6], uint8_t count,
+                     const uint8_t *key) {
+  for (uint8_t i = 0; i < count; i++) {
+    if (keyEquals(set[i], key)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Record a just-confirmed key for known-first reuse on later slots (the reuse
+// that collapses card_1k's sweep to 66 attempts: a key that already opened one
+// sector is the likeliest to open the next). De-duplicated; a no-op once the
+// bounded store is full — the sweep stays correct, it just loses some reuse.
+static void addKnownKey(uint8_t set[][6], uint8_t *count, const uint8_t *key) {
+  if (*count >= MIFARE_CHECK_KNOWN_MAX || keyInSet(set, *count, key)) {
+    return;
+  }
+  memcpy(set[*count], key, 6);
+  (*count)++;
+}
+
+// One sweep authentication with the same clean-session choreography the host's
+// `mifare auth` uses. Before the attempt, tear down any warm Crypto1 session
+// left by a prior success (or the auto-probe) via a re-select, so this auth is
+// evaluated independently instead of riding the open session — the Key B ==
+// Key A false hit documented at mifareCardAuthed / mifareBeginAuth(). After a
+// wrong key (which HALTs the card) re-select so the next attempt starts clean.
+// Sets *removed = true and returns false when a re-select proves the card left
+// the field. Returns true on a real successful auth (card left warm).
+static bool sweepAuth(uint8_t block, uint8_t keyType, const uint8_t *key,
+                      uint32_t *attempts, bool *removed) {
+  *removed = false;
+  if (mifareCardAuthed) {
+    mifareCardAuthed = false;
+    if (!mifareReselect(nfc)) {
+      *removed = true;
+      return false;
+    }
+    delay(MIFARE_CHECK_SETTLE_MS); // let the PN7150 settle before the auth
+  }
+  (*attempts)++;
+  if (mifareAuthenticate(nfc, block, keyType, key)) {
+    mifareCardAuthed = true; // leave warm; next sweepAuth tears it down
+    return true;
+  }
+  if (mifareReselect(nfc)) { // recover the HALTed card before the next key
+    delay(MIFARE_CHECK_SETTLE_MS); // same rest the USB-paced host path gets
+  } else {
+    *removed = true;
+  }
+  return false;
+}
+
+// Try to open one (sector, key type) slot: confirmed keys first (reuse), then
+// the dictionary skipping any key already tried as a confirmed one (the host's
+// dedup(known + dict), first-occurrence-wins order), with an early cut on the
+// first hit. On success copies the winning key into outKey.
+static SweepSlotResult sweepSlot(uint8_t block, uint8_t keyType,
+                                 const uint8_t known[][6], uint8_t knownCount,
+                                 const uint8_t dict[][6], uint8_t dictCount,
+                                 uint32_t *attempts, uint8_t outKey[6]) {
+  for (uint8_t i = 0; i < knownCount; i++) {
+    bool removed;
+    if (sweepAuth(block, keyType, known[i], attempts, &removed)) {
+      memcpy(outKey, known[i], 6);
+      return SLOT_FOUND;
+    }
+    if (removed) {
+      return SLOT_CARD_REMOVED;
+    }
+  }
+  for (uint8_t i = 0; i < dictCount; i++) {
+    if (keyInSet(known, knownCount, dict[i])) {
+      continue; // already tried as a confirmed key
+    }
+    bool removed;
+    if (sweepAuth(block, keyType, dict[i], attempts, &removed)) {
+      memcpy(outKey, dict[i], 6);
+      return SLOT_FOUND;
+    }
+    if (removed) {
+      return SLOT_CARD_REMOVED;
+    }
+  }
+  return SLOT_NOT_FOUND;
+}
+
+// Emit one streamed per-sector result line (serial_log_format.md): the two
+// recovered keys as uppercase hex, or "-" for a hole (restriction #6: holes
+// are reported explicitly, never as zeros or blanks). Streamed as each sector
+// resolves — not accumulated in RAM — so the host parses incrementally and a
+// long sweep shows progress.
+static void emitCheckSector(uint8_t sector, bool haveA, const uint8_t *keyA,
+                            bool haveB, const uint8_t *keyB) {
+  Serial.print(":mifare_check_s");
+  Serial.print(sector);
+  Serial.print(' ');
+  Serial.print(haveA ? TagReader::hexCompact(keyA, 6) : String("-"));
+  Serial.print(' ');
+  Serial.println(haveB ? TagReader::hexCompact(keyB, 6) : String("-"));
+  Serial.flush(); // push the line over USB now; also services the USB stack
+}
+
+// `mifare check [--sectors <n>] [--keys <hex,...>]`
+//   -> :mifare_check_sN <keyA|-> <keyB|-> (one per sector, streamed)
+//      :mifare_check_stat attempts=<n> naive=<n> recovered=<r>/<total>
+//      +OK   (or -ERR if the card leaves the field mid-sweep)
+//
+// --sectors: sectors to sweep (default 16 = 1K; max 32).
+// --keys:    comma-separated 12-hex keys that REPLACE the embedded dictionary
+//            for this run (mirrors the host `--keys`), e.g.
+//            `mifare check --keys FFFFFFFFFFFF,A0A1A2A3A4A5`.
+void handleMifareCheck(char *args) {
+  uint8_t sectors = MIFARE_CHECK_DEFAULT_SECTORS;
+  const uint8_t (*dict)[6] = MIFARE_CHECK_DICT;
+  uint8_t dictCount = MIFARE_CHECK_DICT_COUNT;
+  // --keys override lives in a bounded static buffer so a long list never eats
+  // the stack; single-threaded REPL, so no re-entrancy concern.
+  static uint8_t overrideKeys[MIFARE_CHECK_MAX_KEYS][6];
+
+  char *tok;
+  while ((tok = nextArg(&args)) != nullptr) {
+    if (strcmp(tok, "--sectors") == 0) {
+      char *v = nextArg(&args);
+      int n = (v != nullptr) ? atoi(v) : 0;
+      if (n < 1 || n > MIFARE_CHECK_MAX_SECTORS) {
+        replyErr("usage: mifare check [--sectors <1..32>] [--keys <hex,...>]");
+        return;
+      }
+      sectors = (uint8_t)n;
+    } else if (strcmp(tok, "--keys") == 0) {
+      char *list = nextArg(&args);
+      uint8_t n = 0;
+      for (char *p = list;
+           p != nullptr && *p != '\0' && n < MIFARE_CHECK_MAX_KEYS;) {
+        char *comma = strchr(p, ',');
+        if (comma != nullptr) {
+          *comma = '\0';
+        }
+        if (!parseHexBytes(p, overrideKeys[n], 6)) {
+          replyErr("--keys: each entry must be 12 hex chars, comma-separated");
+          return;
+        }
+        n++;
+        p = (comma != nullptr) ? comma + 1 : nullptr;
+      }
+      if (n == 0) {
+        replyErr("--keys: no keys parsed");
+        return;
+      }
+      dict = overrideKeys;
+      dictCount = n;
+    } else {
+      replyErr("usage: mifare check [--sectors <1..32>] [--keys <hex,...>]");
+      return;
+    }
+  }
+
+  // Confirmed-key reuse store, ordered by first confirmation (known-first).
+  uint8_t known[MIFARE_CHECK_KNOWN_MAX][6];
+  uint8_t knownCount = 0;
+
+  uint32_t attempts = 0; // real auths issued (Tarea 1.8: pin against baseline)
+  uint32_t naive = 0;    // auths a no-reuse, no-early-cut sweep would cost
+  uint8_t recovered = 0;
+  const uint16_t total = (uint16_t)sectors * 2;
+
+  for (uint8_t s = 0; s < sectors; s++) {
+    const uint8_t block = s * MIFARE_BLOCKS_PER_SECTOR;
+    uint8_t keyA[6], keyB[6];
+    bool haveA = false, haveB = false;
+
+    for (uint8_t ktIdx = 0; ktIdx < 2; ktIdx++) {
+      const uint8_t keyType = (ktIdx == 0) ? MIFARE_KEY_A : MIFARE_KEY_B;
+      naive += dictCount; // this slot's naive pool = the dictionary
+      uint8_t found[6];
+      SweepSlotResult res = sweepSlot(block, keyType, known, knownCount, dict,
+                                      dictCount, &attempts, found);
+      if (res == SLOT_CARD_REMOVED) {
+        // Card left the field mid-sweep: end the session and re-arm discovery
+        // (Tarea 1.7) so the host's next command gets a clean "no card"
+        // instead of a hung session. Sectors already resolved were streamed.
+        beginCardRemovalWait();
+        replyErr("card removed mid-sweep, tap a card again");
+        return;
+      }
+      if (res == SLOT_FOUND) {
+        recovered++;
+        addKnownKey(known, &knownCount, found);
+        if (ktIdx == 0) {
+          memcpy(keyA, found, 6);
+          haveA = true;
+        } else {
+          memcpy(keyB, found, 6);
+          haveB = true;
+        }
+      }
+    }
+    emitCheckSector(s, haveA, keyA, haveB, keyB);
+  }
+
+  Serial.print(":mifare_check_stat attempts=");
+  Serial.print(attempts);
+  Serial.print(" naive=");
+  Serial.print(naive);
+  Serial.print(" recovered=");
+  Serial.print(recovered);
+  Serial.print('/');
+  Serial.println(total);
+  // A long sweep may have overrun the idle window while loop() was blocked;
+  // give a follow-up REPL command the full window again.
+  mifareSessionDeadline = millis() + MIFARE_SESSION_IDLE_MS;
+  replyOk();
+}
+
+// `mifare <auth|read|write|sector|keys|check> ...` dispatch. `keys` needs no
+// card; the rest require an open session (Decision 5) - see the file header.
 void handleMifareCommand(char *args) {
   char *sub = nextArg(&args);
   if (sub == nullptr) {
-    replyErr("usage: mifare <auth|read|write|sector|keys> ...");
+    replyErr("usage: mifare <auth|read|write|sector|keys|check> ...");
     return;
   }
 
@@ -587,6 +890,8 @@ void handleMifareCommand(char *args) {
     handleMifareWrite(args);
   } else if (strcmp(sub, "sector") == 0) {
     handleMifareSector(args);
+  } else if (strcmp(sub, "check") == 0) {
+    handleMifareCheck(args);
   } else {
     replyErr("unknown mifare subcommand");
   }
