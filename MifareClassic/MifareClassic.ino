@@ -3,10 +3,13 @@
  *
  * Polls the onboard PN7150 in reader mode; whenever a Mifare Classic card
  * enters the field, reports its UID over USB serial as a structured ":tag"
- * event (same wire format as DetectTags), then probes MIFARE_PROBE_BLOCK
- * with each of the built-in default keys and reports the outcome as a
- * ":mifare" event (Decision 3, MIFARE_CLASSIC_PLAN.md - a distinct event
- * type from ":tag" so TagParser stays UID-only).
+ * event (same wire format as DetectTags), then runs the complete on-detection
+ * auto-probe (Fase 2, Plan de Implementación Firmware MIFARE): the full Fase 1
+ * dictionary sweep - Key A AND Key B across every default-card sector's header
+ * - streaming each sector's recovered keys as ":mifare_check_sN" lines, and
+ * finally a single ":mifare" block event (Decision 3, MIFARE_CLASSIC_PLAN.md -
+ * a distinct event type from ":tag" so TagParser stays UID-only) that doubles
+ * as the host's session-open signal.
  *
  * The card then stays selected in an interactive "mifare session" (instead
  * of immediately blocking on removal) so the host CLI can issue
@@ -51,13 +54,14 @@ BomberCatControl control(Serial, BOMBERCAT_FW_VERSION, BOMBERCAT_FW_NAME);
 
 static bool tagSessionActive = false; // drives control.state()
 
-// Block probed automatically on every Mifare Classic detection, matching
-// ElectronicCats-PN7150's MifareClassic_read_block.ino example default.
+// Block read back on every Mifare Classic detection for the legacy ":mifare"
+// session-open signal event (see probeMifareBlock()), matching
+// ElectronicCats-PN7150's MifareClassic_read_block.ino example default. Fase 2
+// retired the old 3-key MIFARE_PROBE_KEYS table: the auto-probe now sweeps the
+// shared MIFARE_CHECK_DICT below over every sector, so keeping a second,
+// smaller key table would only duplicate the dictionary (restriction #3,
+// Tarea 2.4).
 static const uint8_t MIFARE_PROBE_BLOCK = 4;
-static const uint8_t *const MIFARE_PROBE_KEYS[] = {
-    MIFARE_DEFAULT_KEY_FFFFFF, MIFARE_DEFAULT_KEY_000000,
-    MIFARE_DEFAULT_KEY_A0A1A2A3A4A5};
-static const uint8_t MIFARE_PROBE_KEY_COUNT = 3;
 
 // Compact embedded default-key dictionary for the on-device `mifare check`
 // dictionary sweep (Plan de Implementación Firmware MIFARE, Fase 1). Ordered
@@ -130,6 +134,16 @@ static const uint8_t MIFARE_CHECK_SETTLE_MS = 5;
 // Per-slot sweep outcome (declared here, above the Arduino auto-generated
 // prototypes, so the functions returning it name a known type).
 enum SweepSlotResult { SLOT_FOUND, SLOT_NOT_FOUND, SLOT_CARD_REMOVED };
+
+// Whole-card sweep outcome, returned by the shared runCardSweep() (Fase 2).
+enum SweepResult { SWEEP_DONE, SWEEP_CARD_REMOVED };
+
+// Per-sector result sink for runCardSweep(): called once as each sector
+// resolves, so each caller (`mifare check` and the on-detection auto-probe)
+// emits its own wire format from one shared sweep. `ctx` threads caller state
+// without a global. keyA/keyB are valid only when haveA/haveB are true.
+typedef void (*SweepSectorSink)(uint8_t sector, bool haveA, const uint8_t *keyA,
+                                bool haveB, const uint8_t *keyB, void *ctx);
 
 // Interactive "mifare ..." REPL session over an already-selected Mifare
 // card. Closes (blocking wait-for-removal + re-arm discovery) after this
@@ -328,37 +342,10 @@ void emitMifareEvent(uint32_t tsMs, const String &uidHex, uint8_t blockNum,
   Serial.println(status);
 }
 
-// Try each built-in default key (as Key A) against MIFARE_PROBE_BLOCK and
-// emit the outcome. Read-only - never attempts a write automatically.
-void probeMifareBlock(uint32_t tsMs, const String &uidHex) {
-  uint8_t data[MIFARE_BLOCK_SIZE];
-  uint8_t dataLen = 0;
-  for (uint8_t i = 0; i < MIFARE_PROBE_KEY_COUNT; i++) {
-    if (mifareAuthenticate(nfc, MIFARE_PROBE_BLOCK, MIFARE_KEY_A,
-                           MIFARE_PROBE_KEYS[i]) &&
-        mifareReadBlock(nfc, MIFARE_PROBE_BLOCK, data, &dataLen)) {
-      // The card is left authenticated (no re-select on success) - remember it
-      // so the session's first `mifare auth` re-selects first (see
-      // mifareCardAuthed) instead of riding this probe's session.
-      mifareCardAuthed = true;
-      emitMifareEvent(tsMs, uidHex, MIFARE_PROBE_BLOCK, data, dataLen, "ok");
-      return;
-    }
-    // A failed attempt HALTed the card; re-select before the next key, else
-    // only MIFARE_PROBE_KEYS[0] is ever really tested (same HALT gotcha the
-    // `mifare check` sweep hits). Also re-select after the LAST key: whatever
-    // the outcome here, handleTagDetected() calls openMifareSession() right
-    // after this function returns, and a HALTed card left over from the final
-    // failed attempt would make the very next self-contained REPL command
-    // (e.g. `mifare sector`, which authenticates once with no retry) fail
-    // against a stale, deselected card instead of reporting a real key
-    // mismatch.
-    if (!mifareReselect(nfc)) {
-      break; // card left the field mid-probe; nothing more to try
-    }
-  }
-  emitMifareEvent(tsMs, uidHex, MIFARE_PROBE_BLOCK, nullptr, 0, "auth_fail");
-}
+// probeMifareBlock() — the complete Fase 2 on-detection auto-probe — is defined
+// with the `mifare check` sweep machinery it reuses (search "Fase 2 auto-probe"
+// below), so it sits after runCardSweep()/emitCheckSector() instead of forcing
+// forward declarations for them here.
 
 // --- REPL command extensions (Phase 3) --------------------------------------
 //
@@ -749,6 +736,154 @@ static void emitCheckSector(uint8_t sector, bool haveA, const uint8_t *keyA,
   Serial.flush(); // push the line over USB now; also services the USB stack
 }
 
+// Shared sector x {A,B} dictionary sweep, factored out of `mifare check` so the
+// Fase 2 on-detection auto-probe runs the exact same logic instead of the old
+// degenerate block-4 / Key-A / 3-key probe (Tarea 2.4: reuse, don't duplicate).
+// Sweeps `sectors` sectors, each Key A then Key B, over `dict`, delivering
+// every sector's recovered keys to `sink(..., ctx)` as it resolves. `known`/
+// `knownCount` is the caller-owned confirmed-key reuse store the sweep appends
+// to; it doubles as the Fase 3 key-store seed hook (Tarea 2.5) — pre-fill it
+// with persisted keys before the call, or pass count 0 for a cold sweep. Counts
+// real auths into *attempts (the baseline regression pin) and the no-reuse pool
+// into *naive; counts recovered slots into *recovered. Returns
+// SWEEP_CARD_REMOVED — without arming removal itself, so each caller reports it
+// its own way — when a re-select proves the card left the field mid-sweep;
+// sectors already resolved were already streamed through `sink`.
+static SweepResult runCardSweep(uint8_t sectors, const uint8_t dict[][6],
+                                uint8_t dictCount, uint8_t known[][6],
+                                uint8_t *knownCount, SweepSectorSink sink,
+                                void *ctx, uint32_t *attempts, uint32_t *naive,
+                                uint8_t *recovered) {
+  for (uint8_t s = 0; s < sectors; s++) {
+    const uint8_t block = s * MIFARE_BLOCKS_PER_SECTOR;
+    uint8_t keyA[6], keyB[6];
+    bool haveA = false, haveB = false;
+
+    for (uint8_t ktIdx = 0; ktIdx < 2; ktIdx++) {
+      const uint8_t keyType = (ktIdx == 0) ? MIFARE_KEY_A : MIFARE_KEY_B;
+      *naive += dictCount; // this slot's naive pool = the dictionary
+      uint8_t found[6];
+      SweepSlotResult res = sweepSlot(block, keyType, known, *knownCount, dict,
+                                      dictCount, attempts, found);
+      if (res == SLOT_CARD_REMOVED) {
+        return SWEEP_CARD_REMOVED;
+      }
+      if (res == SLOT_FOUND) {
+        (*recovered)++;
+        addKnownKey(known, knownCount, found);
+        if (ktIdx == 0) {
+          memcpy(keyA, found, 6);
+          haveA = true;
+        } else {
+          memcpy(keyB, found, 6);
+          haveB = true;
+        }
+      }
+    }
+    sink(s, haveA, keyA, haveB, keyB, ctx);
+  }
+  return SWEEP_DONE;
+}
+
+// `mifare check` per-sector sink: stream the recovered keys in the documented
+// :mifare_check_sN format (serial_log_format.md). No ctx needed.
+static void checkSectorSink(uint8_t sector, bool haveA, const uint8_t *keyA,
+                            bool haveB, const uint8_t *keyB, void *ctx) {
+  (void)ctx;
+  emitCheckSector(sector, haveA, keyA, haveB, keyB);
+}
+
+// --- Fase 2 auto-probe -------------------------------------------------------
+
+// Auto-probe sink context: remembers the recovered Key A of the sector holding
+// MIFARE_PROBE_BLOCK, so the auto-probe can still emit the legacy block-4
+// ":mifare" data event as the host's session-open signal.
+struct AutoProbeCtx {
+  uint8_t probeSector; // sector containing MIFARE_PROBE_BLOCK
+  bool haveKeyA;
+  uint8_t keyA[6];
+};
+
+// On-detection auto-probe sink: stream each sector's recovered keys exactly
+// like `mifare check` (one wire format for both, parsed by the host in Fase 4)
+// and capture the probe sector's Key A for the legacy signal event.
+static void autoProbeSectorSink(uint8_t sector, bool haveA, const uint8_t *keyA,
+                                bool haveB, const uint8_t *keyB, void *ctx) {
+  emitCheckSector(sector, haveA, keyA, haveB, keyB);
+  AutoProbeCtx *c = (AutoProbeCtx *)ctx;
+  if (sector == c->probeSector && haveA) {
+    c->haveKeyA = true;
+    memcpy(c->keyA, keyA, 6);
+  }
+}
+
+// Fase 2 — complete on-detection auto-probe. Where the original probe tried
+// only 3 keys as Key A against a single block, this runs the full Fase 1 sweep:
+// Key A AND Key B across every default-card sector's header, over the embedded
+// default-key dictionary (Tareas 2.1/2.2/2.3), reusing runCardSweep so there is
+// one sweep implementation, not two (Tarea 2.4). Each sector's recovered keys
+// stream as :mifare_check_sN lines; then a single legacy ":mifare" block event
+// is emitted LAST as the session-open signal the host blocks on (session.py's
+// _wait_for_mifare_card matches "^:mifare\\s"). Emitting the per-sector lines
+// first and the signal line last lets the host drain the unsolicited sweep
+// output while it waits and start REPL commands on a clean stream. A card with
+// default keys still yields the exact block-4 data event the degenerate probe
+// did (no regression); a fully unknown card yields auth_fail. Read-only — never
+// writes automatically.
+void probeMifareBlock(uint32_t tsMs, const String &uidHex) {
+  // Confirmed-key reuse store. Fase 3 hook (Tarea 2.5): seed this from the
+  // persistent key-store before the sweep so custom keys feed the auto-probe.
+  uint8_t known[MIFARE_CHECK_KNOWN_MAX][6];
+  uint8_t knownCount = 0;
+  uint32_t attempts = 0, naive = 0;
+  uint8_t recovered = 0;
+
+  AutoProbeCtx ctx;
+  ctx.probeSector = MIFARE_PROBE_BLOCK / MIFARE_BLOCKS_PER_SECTOR;
+  ctx.haveKeyA = false;
+
+  if (runCardSweep(MIFARE_CHECK_DEFAULT_SECTORS, MIFARE_CHECK_DICT,
+                   MIFARE_CHECK_DICT_COUNT, known, &knownCount,
+                   autoProbeSectorSink, &ctx, &attempts, &naive,
+                   &recovered) == SWEEP_CARD_REMOVED) {
+    // Card lifted mid-probe: emit the signal so the host stops waiting, then
+    // let handleTagDetected() open the session — its idle/removal poll notices
+    // the absent card and re-arms discovery.
+    emitMifareEvent(tsMs, uidHex, MIFARE_PROBE_BLOCK, nullptr, 0, "auth_fail");
+    return;
+  }
+
+  // Legacy session-open signal: re-read MIFARE_PROBE_BLOCK with the Key A the
+  // sweep recovered for its sector, so a default-keyed card still produces the
+  // exact block-4 data event the degenerate probe did. The sweep left a warm
+  // Crypto1 session on the LAST swept sector, so tear it down first (a
+  // re-select) to keep this authentication independent — the same
+  // mifareCardAuthed choreography every other auth path uses.
+  if (ctx.haveKeyA) {
+    if (mifareCardAuthed) {
+      mifareCardAuthed = false;
+      if (!mifareReselect(nfc)) {
+        emitMifareEvent(tsMs, uidHex, MIFARE_PROBE_BLOCK, nullptr, 0,
+                        "auth_fail");
+        return; // card gone; the removal poll re-arms discovery
+      }
+    }
+    uint8_t data[MIFARE_BLOCK_SIZE];
+    uint8_t dataLen = 0;
+    if (mifareAuthenticate(nfc, MIFARE_PROBE_BLOCK, MIFARE_KEY_A, ctx.keyA) &&
+        mifareReadBlock(nfc, MIFARE_PROBE_BLOCK, data, &dataLen)) {
+      mifareCardAuthed = true; // leave warm; session's first auth tears it down
+      emitMifareEvent(tsMs, uidHex, MIFARE_PROBE_BLOCK, data, dataLen, "ok");
+      return;
+    }
+    // Unexpected: the sweep found Key A but this re-auth/read failed. Recover a
+    // cleanly selected card and fall through to auth_fail.
+    mifareCardAuthed = false;
+    mifareReselect(nfc);
+  }
+  emitMifareEvent(tsMs, uidHex, MIFARE_PROBE_BLOCK, nullptr, 0, "auth_fail");
+}
+
 // `mifare check [--sectors <n>] [--keys <hex,...>]`
 //   -> :mifare_check_sN <keyA|-> <keyB|-> (one per sector, streamed)
 //      :mifare_check_stat attempts=<n> naive=<n> recovered=<r>/<total>
@@ -805,6 +940,7 @@ void handleMifareCheck(char *args) {
   }
 
   // Confirmed-key reuse store, ordered by first confirmation (known-first).
+  // Fase 3 hook (Tarea 2.5): seed this from the persistent key-store here.
   uint8_t known[MIFARE_CHECK_KNOWN_MAX][6];
   uint8_t knownCount = 0;
 
@@ -813,38 +949,15 @@ void handleMifareCheck(char *args) {
   uint8_t recovered = 0;
   const uint16_t total = (uint16_t)sectors * 2;
 
-  for (uint8_t s = 0; s < sectors; s++) {
-    const uint8_t block = s * MIFARE_BLOCKS_PER_SECTOR;
-    uint8_t keyA[6], keyB[6];
-    bool haveA = false, haveB = false;
-
-    for (uint8_t ktIdx = 0; ktIdx < 2; ktIdx++) {
-      const uint8_t keyType = (ktIdx == 0) ? MIFARE_KEY_A : MIFARE_KEY_B;
-      naive += dictCount; // this slot's naive pool = the dictionary
-      uint8_t found[6];
-      SweepSlotResult res = sweepSlot(block, keyType, known, knownCount, dict,
-                                      dictCount, &attempts, found);
-      if (res == SLOT_CARD_REMOVED) {
-        // Card left the field mid-sweep: end the session and re-arm discovery
-        // (Tarea 1.7) so the host's next command gets a clean "no card"
-        // instead of a hung session. Sectors already resolved were streamed.
-        beginCardRemovalWait();
-        replyErr("card removed mid-sweep, tap a card again");
-        return;
-      }
-      if (res == SLOT_FOUND) {
-        recovered++;
-        addKnownKey(known, &knownCount, found);
-        if (ktIdx == 0) {
-          memcpy(keyA, found, 6);
-          haveA = true;
-        } else {
-          memcpy(keyB, found, 6);
-          haveB = true;
-        }
-      }
-    }
-    emitCheckSector(s, haveA, keyA, haveB, keyB);
+  if (runCardSweep(sectors, dict, dictCount, known, &knownCount,
+                   checkSectorSink, nullptr, &attempts, &naive,
+                   &recovered) == SWEEP_CARD_REMOVED) {
+    // Card left the field mid-sweep: end the session and re-arm discovery
+    // (Tarea 1.7) so the host's next command gets a clean "no card" instead of
+    // a hung session. Sectors already resolved were streamed.
+    beginCardRemovalWait();
+    replyErr("card removed mid-sweep, tap a card again");
+    return;
   }
 
   Serial.print(":mifare_check_stat attempts=");
