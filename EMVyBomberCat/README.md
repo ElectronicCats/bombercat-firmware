@@ -16,7 +16,7 @@ todo manejable por **serie** desde EMVyController.
 | `MAG:<track1>\|<track2>`   | MAG    | Emula un swipe de banda magnética (magspoof) → `OK`  |
 | `EMU:<hex>`                | NDEF   | Emula un tag NFC Type 4 (NDEF); observable y cancelable |
 | `CARDSCAN`                 | EMV    | Lee una tarjeta EMV por NFC y la guarda en **RAM** del firmware |
-| `EMUEMV[:aid\|pan\|exp\|t2\|cid\|RAM[ \|cid]]` | EMV | Emula tarjeta EMV: sin args=Visa prueba; `:hex…`=captura del host; `:RAM`=la escaneada con CARDSCAN; `cid` (5º campo) = decisión de criptograma 40=TC offline / 80=ARQC (default) / 00=AAC |
+| `EMUEMV[:aid\|pan\|exp\|t2[\|cid]]` o `:RAM[\|cid]` | EMV | Emula tarjeta EMV: sin args=Visa prueba; `:hex…`=captura del host; `:RAM`=la escaneada con CARDSCAN; `cid` (5º campo, o tras `RAM|`) = decisión de criptograma 40=TC offline / 80=ARQC (default) / 00=AAC |
 | `STOP`                     | EMU    | Detiene la emulación en curso (NDEF o EMV) → `EMU:DONE` |
 | `REBOOT` / `RESET`         | —      | Reinicia el MCU (`NVIC_SystemReset`); el USB se re-enumera |
 
