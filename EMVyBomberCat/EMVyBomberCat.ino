@@ -3192,12 +3192,15 @@ static int emvBuildAidFci(const uint8_t *aid, uint8_t aidlen, uint8_t *out) {
                                    0x04, 0x84, 0x30}; // 9F5A real
     uint8_t panl;
     const uint8_t *pan = cardPan(&panl);
-    (void)panl;
-    // BF0C{ 9F5A 06 <ttf> 42 03 <IIN=3B del PAN> } — los 14 bytes EXACTOS de
-    // la tarjeta real. Ojo: el IIN va DENTRO del BF0C y la longitud debe ser
-    // exacta (0x0E): declararla mal "come" bytes del A5 y el kernel tacha la
-    // tarjeta como ilegible (visto en hardware real: "no se puede leer la
-    // tarjeta").
+    // IIN = 3 primeros bytes BCD del PAN; si el PAN es más corto se rellena
+    // con 0x00 (nunca se leen bytes fuera de la longitud válida: gCardPan es
+    // estático y podría contener restos de una captura anterior más larga).
+    uint8_t iin[3] = {0, 0, 0};
+    memcpy(iin, pan, panl < 3 ? panl : 3);
+    // BF0C{ 9F5A 06 <ttf> 42 03 <IIN> } — los 14 bytes EXACTOS de la tarjeta
+    // real. Ojo: el IIN va DENTRO del BF0C y la longitud debe ser exacta
+    // (0x0E): declararla mal "come" bytes del A5 y el kernel tacha la tarjeta
+    // como ilegible (visto en hardware real: "no se puede leer la tarjeta").
     a5[a++] = 0xBF;
     a5[a++] = 0x0C;
     a5[a++] = (uint8_t)(3 + 6 + 2 + 3);
@@ -3208,7 +3211,7 @@ static int emvBuildAidFci(const uint8_t *aid, uint8_t aidlen, uint8_t *out) {
     a += 6;
     a5[a++] = 0x42;
     a5[a++] = 0x03;
-    memcpy(&a5[a], pan, 3);
+    memcpy(&a5[a], iin, 3);
     a += 3; // IIN = primeros 3 bytes del PAN emulado
   }
   uint8_t inner[160];
@@ -3300,7 +3303,8 @@ static int emvBuildGpoResp(uint8_t *out) {
   const uint8_t *t2 = cardT2(&t2l);
   static const uint8_t AC8[] = {0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x11, 0x22, 0x33};
   static const uint8_t IAD7[] = {0x06, 0x01, 0x12, 0x03,
-                                 0xA0, 0x60, 0x00}; // IAD de la tarjeta real
+                                 0xA0, 0x20, 0x00}; // IAD de la tarjeta real
+                                                    // (idéntico al del GEN AC)
   static const uint8_t NM[] = {'P', 'A', 'Y', 'W', 'A', 'V',
                                'E', '/', 'V', 'I', 'S', 'A'};
   uint8_t b[200];
