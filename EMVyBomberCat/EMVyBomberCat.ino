@@ -2985,6 +2985,16 @@ static uint8_t gCardExpLen = 0;
 static uint8_t gCardT2[40];
 static uint8_t gCardT2Len = 0;
 
+// Decisión de criptograma que devuelve la tarjeta emulada (tag 9F27, CID):
+//   0x40 = TC  → la transacción se APRUEBA offline y el cobro COMPLETA
+//                (como los cobros contactless de bajo monto reales; el AC es
+//                dummy y sin ODA el terminal no puede verificarlo igualmente).
+//   0x80 = ARQC (default) → el terminal intenta ir ONLINE y el cobro se cuelga
+//                esperando un host que nunca autorizará el criptograma fake.
+//   0x00 = AAC → declinada. Lo fija el 5º campo de EMUEMV (host); sin él o si
+//                es inválido se usa ARQC (comportamiento histórico).
+static uint8_t gEmuCid = 0x80;
+
 // Punteros/longitudes efectivos (captura o default) por campo.
 static const uint8_t *cardAid(uint8_t *l) {
   if (gCardCustom && gCardAidLen) {
@@ -3254,10 +3264,11 @@ static int emvBuildRecord(uint8_t *out) {
 // (capturada con el BomberCat): 77{ 82 AIP=2000, 57 track2, 5F20
 // "PAYWAVE/VISA", 5F34, 9F10 IAD, 9F26 AC, 9F27 CID, 9F36 ATC, 9F5D, 9F6C
 // CTQ, 9F6E FFI }. SIN AFL: el kernel NO hace READ RECORD — la transacción
-// completa en el GPO. CID=0x80 (ARQC) → el terminal pide autorización online.
-// El AC es DUMMY (no hay clave del emisor): el POS acepta la tarjeta real con
-// AIP 2000 y sin firma 9F4B en el GPO, así que la réplica hereda ese
-// comportamiento.
+// completa en el GPO. El CID (`gEmuCid`) es la decisión de la tarjeta: TC
+// (0x40) hace que el kernel APRUEBE offline y el cobro COMPLETE; ARQC (0x80,
+// default) replica lo que hace la tarjeta real (ir online). El AC es DUMMY (no
+// hay clave del emisor): el POS acepta la tarjeta real con AIP 2000 y sin
+// firma 9F4B en el GPO, así que la réplica hereda ese comportamiento.
 static uint16_t gEmuAtc = 0; // ATC de la tarjeta emulada; incrementa por GPO
 static int emvBuildGpoResp(uint8_t *out) {
   uint8_t t2l;
@@ -3303,7 +3314,7 @@ static int emvBuildGpoResp(uint8_t *out) {
   b[i++] = 0x9F;
   b[i++] = 0x27;
   b[i++] = 0x01;
-  b[i++] = 0x80; // CID = ARQC
+  b[i++] = gEmuCid; // CID (decisión de la tarjeta)
   b[i++] = 0x9F;
   b[i++] = 0x36;
   b[i++] = 0x02; // ATC (incrementa)
@@ -3344,12 +3355,14 @@ static int emvBuildGpoResp(uint8_t *out) {
   return o;
 }
 
-// Parsea `EMUEMV:<aid>|<pan>|<exp>|<track2>` (hex; campos vacíos = default) e
-// inyecta los datos de la captura en la tarjeta emulada. Reporta lo cargado.
-static void emvParseCard(const String &p) {
+// Parsea `EMUEMV:<aid>|<pan>|<exp>|<track2>[|<cid>]` (hex; campos vacíos =
+// default) e inyecta los datos de la captura en la tarjeta emulada. Reporta lo
+// cargado. Devuelve el CID del 5º campo (0 si no llegó o es inválido).
+static uint8_t emvParseCard(const String &p) {
   gCardAidLen = gCardPanLen = gCardExpLen = gCardT2Len = 0;
+  uint8_t cid = 0;
   int from = 0;
-  for (int f = 0; f < 4; f++) {
+  for (int f = 0; f < 5; f++) {
     int bar = p.indexOf('|', from);
     String tok = (bar < 0) ? p.substring(from) : p.substring(from, bar);
     tok.trim();
@@ -3366,6 +3379,11 @@ static void emvParseCard(const String &p) {
       else if (f == 3)
         gCardT2Len =
             (uint8_t)HexUtils::decode(tok.c_str(), gCardT2, sizeof(gCardT2));
+      else if (f == 4) {
+        uint8_t v[1];
+        if (HexUtils::decode(tok.c_str(), v, 1) == 1)
+          cid = v[0];
+      }
     }
     if (bar < 0)
       break;
@@ -3379,7 +3397,10 @@ static void emvParseCard(const String &p) {
   Serial.print(" exp=");
   Serial.print(gCardExpLen);
   Serial.print(" t2=");
-  Serial.println(gCardT2Len);
+  Serial.print(gCardT2Len);
+  Serial.print(" cid=");
+  Serial.println(cid, HEX);
+  return cid;
 }
 
 // Copia la tarjeta recién leída (struct `card`: strings
@@ -3497,7 +3518,7 @@ static void emvCardRespond(const uint8_t *cmd, uint8_t n, uint8_t *rsp,
     b[i++] = 0x9F;
     b[i++] = 0x27;
     b[i++] = 0x01;
-    b[i++] = 0x80; // CID = ARQC
+    b[i++] = gEmuCid; // CID (decisión de la tarjeta)
     b[i++] = 0x9F;
     b[i++] = 0x36;
     b[i++] = 0x02;
@@ -3576,6 +3597,8 @@ static void emvLogCmd(const uint8_t *cmd, uint8_t n) {
                                             : "AAC";
     Serial.print("EMU:RX GENERATE-AC pide=");
     Serial.print(t);
+    Serial.print(" da="); // decisión (efectiva) de la tarjeta
+    Serial.print(gEmuCid == 0x40 ? "TC" : gEmuCid == 0x80 ? "ARQC" : "AAC");
     Serial.print(" ");
     Serial.println(hx);
     uint8_t lc = (n > 4 ? cmd[4] : 0);
@@ -3914,12 +3937,14 @@ bool emvyCommand(const char *verb, char *args) {
     return true;
   }
 
-  // EMUEMV[:<aid>|<pan>|<exp>|<track2>|RAM] — emula una TARJETA EMV para
-  // perfilar/ fuzzear un terminal de pago (responde PPSE/SELECT/GPO/READ
-  // RECORD/GEN AC y reporta lo que pide). Sin parámetros usa una Visa de
-  // prueba; con `:<hex...>` inyecta los datos REALES de una captura (host); con
-  // `:RAM` reemula la tarjeta guardada en RAM por CARDSCAN. Se para igual que
-  // la NDEF. Debe ir ANTES de "EMU:".
+  // EMUEMV[:<aid>|<pan>|<exp>|<track2>[|<cid>]|RAM[|<cid>]] — emula una
+  // TARJETA EMV para perfilar/fuzzear un terminal de pago (responde
+  // PPSE/SELECT/GPO/GEN AC y reporta lo que pide). Sin parámetros usa una
+  // Visa de prueba; con `:<hex...>` inyecta los datos REALES de una captura
+  // (host); con `:RAM` reemula la tarjeta guardada en RAM por CARDSCAN. El
+  // campo opcional `<cid>` (00/40/80) fija la decisión de criptograma: 40=TC
+  // aprueba offline y el cobro COMPLETA, 80=ARQC fuerza online (default),
+  // 00=AAC declina. Se para igual que la NDEF. Debe ir ANTES de "EMU:".
   if (up.startsWith("EMUEMV")) {
     int colon = c.indexOf(':');
     if (colon >= 0) {
@@ -3927,13 +3952,23 @@ bool emvyCommand(const char *verb, char *args) {
       rest.trim();
       String ru = rest;
       ru.toUpperCase();
-      if (ru == "RAM") {
+      if (ru.startsWith("RAM")) {
         if (!gCardCustom)
           Serial.println(
               "# EMUEMV:RAM sin tarjeta en RAM — usando tarjeta de prueba");
         // usa gCard* tal cual (de CARDSCAN o un EMUEMV: previo); no la toca
+        int bar = rest.indexOf('|'); // RAM|<cid>
+        if (bar >= 0) {
+          uint8_t v[1];
+          String t = rest.substring(bar + 1);
+          t.trim();
+          if (HexUtils::decode(t.c_str(), v, 1) == 1)
+            gEmuCid = v[0];
+        }
       } else {
-        emvParseCard(rest);
+        uint8_t cid = emvParseCard(rest);
+        if (cid)
+          gEmuCid = cid;
       }
     } else {
       gCardCustom = false; // EMUEMV a secas = tarjeta de prueba canned
