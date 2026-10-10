@@ -28,8 +28,15 @@ No bloquea: arranca (`EMU:START`) y sigue hasta `STOP`/`RELEASE`, otro `EMU:`, `
 de seguridad (180 s) → `EMU:DONE sent=<k> reason=<...>`.
 
 **Emulación de tarjeta EMV** (`EMUEMV`): en vez de un tag NDEF, responde al flujo EMV contactless de un
-**terminal de pago** (`SELECT PPSE → FCI`, `SELECT AID → FCI con PDOL`, `GPO → AIP+AFL`, `READ RECORD`,
-`GENERATE AC`) con datos canned, para que el terminal **avance y revele su configuración**. Reporta
+**terminal de pago** (`SELECT PPSE → FCI`, `SELECT AID → FCI con PDOL`, `GPO → 77 fast-path con el
+criptograma dentro`, `GENERATE AC`) con datos canned, para que el terminal **avance y revele su
+configuración**. El GPO es **fast path qVSDC puro**, réplica estructural de una tarjeta Visa real que
+un POS de prueba acepta (validado sobre tarjeta bancaria real): `77{ 82 AIP=2000, 57 track2, 5F20
+"PAYWAVE/VISA", 5F34, 9F10 IAD, 9F26 AC, 9F27 CID, 9F36 ATC, 9F5D, 9F6C CTQ, 9F6E FFI }` — **sin AFL**
+(el terminal no hace READ RECORD y la transacción puede completar en el GPO). Los FCIs del PPSE y del
+SELECT AID replican a la tarjeta real (label `50`/`9F12` "VISA DEBITO", `5F2D`, `9F11`, `BF0C{9F5A, IIN
+42}` — el IIN se deriva del PAN emulado y va DENTRO del BF0C; un TLV mal formado aquí hacía que el POS
+abortara con "tarjeta ilegible"). Reporta
 `EMU:RX SELECT-PPSE`, `EMU:RX SELECT-AID <hex> (ESQUEMA)`, y sobre todo el **PDOL del GPO decodificado**
 (`  PDOL TTQ(9F66)=… Monto(9F02)=… Pais(9F1A)=… Divisa(5F2A)=… UN(9F37)=…`) y el CDOL1 del GENERATE AC.
 **No** genera un criptograma válido (sin la clave del emisor): el objetivo es **extraer el perfil del

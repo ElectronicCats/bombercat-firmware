@@ -2932,15 +2932,14 @@ static void emuOnReaderApdu(const uint8_t *cmd, uint8_t n) {
 // ===========================================================================
 
 // PDOL que anunciamos en el FCI del AID (9F38) + tabla para trocear el GPO.
+// Réplica del PDOL de una Visa Debito REAL: NO pide 9F35 (tipo de terminal).
 static const uint8_t EMV_PDOL_BYTES[] = {
-    0x9F, 0x66, 0x04, 0x9F, 0x02, 0x06, 0x9F, 0x03, 0x06,
-    0x9F, 0x1A, 0x02, 0x95, 0x05, 0x5F, 0x2A, 0x02, 0x9A,
-    0x03, 0x9C, 0x01, 0x9F, 0x37, 0x04, 0x9F, 0x35, 0x01};
+    0x9F, 0x66, 0x04, 0x9F, 0x02, 0x06, 0x9F, 0x03, 0x06, 0x9F, 0x1A, 0x02,
+    0x95, 0x05, 0x5F, 0x2A, 0x02, 0x9A, 0x03, 0x9C, 0x01, 0x9F, 0x37, 0x04};
 static const DolItem EMV_PDOL[] = {
-    {0x9F66, 4, "TTQ"},      {0x9F02, 6, "Monto"}, {0x9F03, 6, "MontoOtro"},
-    {0x9F1A, 2, "Pais"},     {0x95, 5, "TVR"},     {0x5F2A, 2, "Divisa"},
-    {0x9A, 3, "Fecha"},      {0x9C, 1, "TipoTxn"}, {0x9F37, 4, "UN"},
-    {0x9F35, 1, "TipoTerm"},
+    {0x9F66, 4, "TTQ"},  {0x9F02, 6, "Monto"}, {0x9F03, 6, "MontoOtro"},
+    {0x9F1A, 2, "Pais"}, {0x95, 5, "TVR"},     {0x5F2A, 2, "Divisa"},
+    {0x9A, 3, "Fecha"},  {0x9C, 1, "TipoTxn"}, {0x9F37, 4, "UN"},
 };
 static const int EMV_NUM_PDOL = (int)(sizeof(EMV_PDOL) / sizeof(EMV_PDOL[0]));
 
@@ -3020,20 +3019,50 @@ static const uint8_t *cardT2(uint8_t *l) {
   return DEF_T2;
 }
 
-// FCI del PPSE: anuncia el AID de la tarjeta (capturada o Visa por defecto).
+// Label de la tarjeta emulada, copiado de una Visa Debito REAL leída con el
+// BomberCat ("VISA DEBITO" en 50/9F12 dentro del PPSE y del FCI del AID).
+static const char *cardLabel(uint8_t *l) {
+  uint8_t aidlen;
+  const uint8_t *aid = cardAid(&aidlen);
+  if (aidlen >= 5 && !memcmp(aid, "\xA0\x00\x00\x00\x03", 5)) {
+    *l = 11;
+    return "VISA DEBITO";
+  }
+  if (aidlen >= 5 && !memcmp(aid, "\xA0\x00\x00\x00\x04", 5)) {
+    *l = 10;
+    return "MASTERCARD";
+  }
+  *l = 4;
+  return "CARD";
+}
+
+// FCI del PPSE calcado de una Visa Debito real: 61{ 4F<aid> 50<label>
+// 87 01 01 9F12<label> }. La label y el nombre preferido (9F12) NO eran
+// opcionales: sin ellos el POS de prueba abortaba tras el PPSE.
 static int emvBuildPpseFci(uint8_t *out) {
   uint8_t aidlen;
   const uint8_t *aid = cardAid(&aidlen);
-  uint8_t dir[32];
-  int d = 0; // 4F <aid> 87 01 01
+  uint8_t lablen;
+  const char *lab = cardLabel(&lablen);
+  uint8_t dir[64];
+  int d = 0; // 4F <aid> 50 <label> 87 01 01 9F12 <label>
   dir[d++] = 0x4F;
   dir[d++] = aidlen;
   memcpy(&dir[d], aid, aidlen);
   d += aidlen;
+  dir[d++] = 0x50;
+  dir[d++] = lablen;
+  memcpy(&dir[d], lab, lablen);
+  d += lablen;
   dir[d++] = 0x87;
   dir[d++] = 0x01;
   dir[d++] = 0x01;
-  uint8_t bf[48];
+  dir[d++] = 0x9F;
+  dir[d++] = 0x12;
+  dir[d++] = lablen;
+  memcpy(&dir[d], lab, lablen);
+  d += lablen;
+  uint8_t bf[80];
   int b = 0; // BF0C{ 61{ dir } }
   bf[b++] = 0xBF;
   bf[b++] = 0x0C;
@@ -3042,7 +3071,7 @@ static int emvBuildPpseFci(uint8_t *out) {
   bf[b++] = (uint8_t)d;
   memcpy(&bf[b], dir, d);
   b += d;
-  uint8_t inner[80];
+  uint8_t inner[120];
   int i = 0; // 84<name> A5{ BF0C }
   inner[i++] = 0x84;
   inner[i++] = (uint8_t)sizeof(PPSE_NAME);
@@ -3079,25 +3108,75 @@ static const char *emvSchemeName(const uint8_t *aid, uint8_t len) {
   return "?";
 }
 
-// Construye el FCI de respuesta a SELECT AID: 6F{ 84<aid> A5{ 50"CARD"
-// 9F38<pdol> } }
+// Construye el FCI de respuesta a SELECT AID calcado de una Visa Debito REAL:
+// 6F{ 84<aid> A5{ 50<label> 87 01 01 9F12<label> 5F2D"esptenfr" 9F11 01
+//     9F38<pdol> BF0C{9F5A} 42<IIN> } }.
+// El 9F5A (Terminal Transaction Flags, valor copiado de la tarjeta real) y el
+// IIN (42, primeros 3 bytes del PAN emulado — nunca un IIN hardcodeado de una
+// tarjeta real) solo se emiten para Visa; el PDOL replica el de la tarjeta
+// real (SIN 9F35: el terminal lo envía igual si se le pide, pero la tarjeta
+// genuina no lo solicita).
 static int emvBuildAidFci(const uint8_t *aid, uint8_t aidlen, uint8_t *out) {
   if (aidlen > 16)
     aidlen = 16;
-  uint8_t a5[64];
+  uint8_t lablen;
+  const char *lab = cardLabel(&lablen);
+  bool visa = (aidlen >= 5 && !memcmp(aid, "\xA0\x00\x00\x00\x03", 5));
+  uint8_t a5[128];
   int a = 0;
   a5[a++] = 0x50;
-  a5[a++] = 0x04;
-  a5[a++] = 'C';
-  a5[a++] = 'A';
-  a5[a++] = 'R';
-  a5[a++] = 'D';
+  a5[a++] = lablen;
+  memcpy(&a5[a], lab, lablen);
+  a += lablen;
+  a5[a++] = 0x87;
+  a5[a++] = 0x01;
+  a5[a++] = 0x01;
+  a5[a++] = 0x9F;
+  a5[a++] = 0x12;
+  a5[a++] = lablen;
+  memcpy(&a5[a], lab, lablen);
+  a += lablen;
+  static const uint8_t langs[8] = {'e', 's', 'p', 't',
+                                   'e', 'n', 'f', 'r'}; // 5F2D
+  a5[a++] = 0x5F;
+  a5[a++] = 0x2D;
+  a5[a++] = 0x08;
+  memcpy(&a5[a], langs, 8);
+  a += 8;
+  a5[a++] = 0x9F;
+  a5[a++] = 0x11;
+  a5[a++] = 0x01;
+  a5[a++] = 0x01;
   a5[a++] = 0x9F;
   a5[a++] = 0x38;
   a5[a++] = (uint8_t)sizeof(EMV_PDOL_BYTES);
   memcpy(&a5[a], EMV_PDOL_BYTES, sizeof(EMV_PDOL_BYTES));
   a += (int)sizeof(EMV_PDOL_BYTES);
-  uint8_t inner[128];
+  if (visa) {
+    static const uint8_t ttf[6] = {0x52, 0x04, 0x84,
+                                   0x04, 0x84, 0x30}; // 9F5A real
+    uint8_t panl;
+    const uint8_t *pan = cardPan(&panl);
+    (void)panl;
+    // BF0C{ 9F5A 06 <ttf> 42 03 <IIN=3B del PAN> } — los 14 bytes EXACTOS de
+    // la tarjeta real. Ojo: el IIN va DENTRO del BF0C y la longitud debe ser
+    // exacta (0x0E): declararla mal "come" bytes del A5 y el kernel tacha la
+    // tarjeta como ilegible (visto en hardware real: "no se puede leer la
+    // tarjeta").
+    a5[a++] = 0xBF;
+    a5[a++] = 0x0C;
+    a5[a++] = (uint8_t)(3 + 6 + 2 + 3);
+    a5[a++] = 0x9F;
+    a5[a++] = 0x5A;
+    a5[a++] = 0x06;
+    memcpy(&a5[a], ttf, 6);
+    a += 6;
+    a5[a++] = 0x42;
+    a5[a++] = 0x03;
+    memcpy(&a5[a], pan, 3);
+    a += 3; // IIN = primeros 3 bytes del PAN emulado
+  }
+  uint8_t inner[160];
   int i = 0;
   inner[i++] = 0x84;
   inner[i++] = aidlen;
@@ -3170,48 +3249,43 @@ static int emvBuildRecord(uint8_t *out) {
   return o;
 }
 
-// Construye la respuesta del GPO estilo **qVSDC** (Visa contactless): template
-// 77 con el criptograma DENTRO (AIP/AFL + ATC/AC/CID/IAD/CTQ + track2). Sin
-// esto (solo AIP+AFL en un 80) el kernel Visa 3 trata la transacción como
-// incompleta y re-arma el campo en bucle. CID=0x80 (ARQC) → el terminal pide
-// autorización online. El AC es DUMMY (no hay clave del emisor): no aprueba el
-// pago, pero el terminal deja de reintentar y avanza a su decisión
-// (online/declina).
+// Construye la respuesta del GPO **fast path qVSDC**, RÉPLICA EXACTA de la
+// respuesta GPO real de una tarjeta bancaria Visa que el POS de prueba acepta
+// (capturada con el BomberCat): 77{ 82 AIP=2000, 57 track2, 5F20
+// "PAYWAVE/VISA", 5F34, 9F10 IAD, 9F26 AC, 9F27 CID, 9F36 ATC, 9F5D, 9F6C
+// CTQ, 9F6E FFI }. SIN AFL: el kernel NO hace READ RECORD — la transacción
+// completa en el GPO. CID=0x80 (ARQC) → el terminal pide autorización online.
+// El AC es DUMMY (no hay clave del emisor): el POS acepta la tarjeta real con
+// AIP 2000 y sin firma 9F4B en el GPO, así que la réplica hereda ese
+// comportamiento.
 static uint16_t gEmuAtc = 0; // ATC de la tarjeta emulada; incrementa por GPO
 static int emvBuildGpoResp(uint8_t *out) {
   uint8_t t2l;
   const uint8_t *t2 = cardT2(&t2l);
   static const uint8_t AC8[] = {0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x11, 0x22, 0x33};
   static const uint8_t IAD7[] = {0x06, 0x01, 0x12, 0x03,
-                                 0xA0, 0x60, 0x00}; // IAD estilo Visa
-  gEmuAtc++;
+                                 0xA0, 0x60, 0x00}; // IAD de la tarjeta real
+  static const uint8_t NM[] = {'P', 'A', 'Y', 'W', 'A', 'V',
+                               'E', '/', 'V', 'I', 'S', 'A'};
   uint8_t b[200];
   int i = 0;
-  // Estructura calcada de una respuesta qVSDC real (Visa contactless), SIN AFL:
-  // todo va dentro del 77 (fast-path), así el terminal no hace READ RECORD y no
-  // rechaza-reinicia. AIP=2000, CTQ=2840, FFI=20700000 como una tarjeta real.
-  // AIP = 1800: CVM soportado (b5) + gestión de riesgo (b4), SIN SDA/DDA/CDA.
-  // Anunciar DDA/CDA (p.ej. 2000/1980) hace que el kernel Visa espere la firma
-  // 9F4B (fDDA) dentro del GPO; como no podemos firmarla, la trataba como
-  // "tarjeta ilegible" y abortaba. Sin auth offline el terminal salta la ODA y
-  // va directo a online con el ARQC (lo que su TTQ ya pide).
+  // Estructura calcada de una respuesta qVSDC real (Visa contactless), SIN
+  // AFL: todo va dentro del 77 (fast-path), así el terminal no hace READ
+  // RECORD y no rechaza-reinicia. AIP=2000, CTQ=2840, FFI=20700000 como una
+  // tarjeta real.
   b[i++] = 0x82;
   b[i++] = 0x02;
-  b[i++] = 0x18;
-  b[i++] = 0x00; // AIP = 1800
-  // AFL SFI1 rec1: hace que el terminal ADEMÁS lea el registro (READ RECORD) →
-  // más traza en la consola (útil para perfilar). El criptograma ya va aquí en
-  // el 77, así que el terminal no depende del registro para el cripto.
-  b[i++] = 0x94;
-  b[i++] = 0x04;
-  b[i++] = 0x08;
-  b[i++] = 0x01;
-  b[i++] = 0x01;
-  b[i++] = 0x00;
+  b[i++] = 0x20;
+  b[i++] = 0x00; // AIP = 2000 (como la real)
   b[i++] = 0x57;
   b[i++] = t2l;
   memcpy(&b[i], t2, t2l);
   i += t2l; // Track2 equiv
+  b[i++] = 0x5F;
+  b[i++] = 0x20;
+  b[i++] = 0x0C;
+  memcpy(&b[i], NM, 12);
+  i += 12; // 5F20 "PAYWAVE/VISA"
   b[i++] = 0x5F;
   b[i++] = 0x34;
   b[i++] = 0x01;
@@ -3235,6 +3309,16 @@ static int emvBuildGpoResp(uint8_t *out) {
   b[i++] = 0x02; // ATC (incrementa)
   b[i++] = (uint8_t)(gEmuAtc >> 8);
   b[i++] = (uint8_t)(gEmuAtc & 0xFF);
+  gEmuAtc++;
+  b[i++] = 0x9F;
+  b[i++] = 0x5D;
+  b[i++] = 0x06; // 9F5D (como la real)
+  b[i++] = 0x00;
+  b[i++] = 0x00;
+  b[i++] = 0x00;
+  b[i++] = 0x00;
+  b[i++] = 0x00;
+  b[i++] = 0x00;
   b[i++] = 0x9F;
   b[i++] = 0x6C;
   b[i++] = 0x02;
@@ -3405,12 +3489,38 @@ static void emvCardRespond(const uint8_t *cmd, uint8_t n, uint8_t *rsp,
     return;
   }
   if (cla == 0x80 && ins == 0xAE) { // GENERATE AC
-    static const uint8_t AC[] = {
-        0x77, 0x1E, 0x9F, 0x27, 0x01, 0x80, 0x9F, 0x36, 0x02, 0x00, 0x01,
-        0x9F, 0x26, 0x08, 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x11, 0x22, 0x33,
-        0x9F, 0x10, 0x07, 0x06, 0x01, 0x0A, 0x03, 0xA0, 0x00, 0x00};
-    memcpy(rsp, AC, sizeof(AC));
-    *rspLen = sizeof(AC);
+    // Respaldo si un kernel pide el AC pese al fast path: 77{ CID + ATC + AC
+    // dummy + IAD }. El ATC NO se incrementa aquí (ya subió en el GPO: una
+    // tarjeta real mantiene el ATC constante dentro de la transacción).
+    uint8_t b[40];
+    int i = 0;
+    b[i++] = 0x9F;
+    b[i++] = 0x27;
+    b[i++] = 0x01;
+    b[i++] = 0x80; // CID = ARQC
+    b[i++] = 0x9F;
+    b[i++] = 0x36;
+    b[i++] = 0x02;
+    b[i++] = (uint8_t)(gEmuAtc >> 8);
+    b[i++] = (uint8_t)(gEmuAtc & 0xFF);
+    static const uint8_t AC8[] = {0xDE, 0xAD, 0xBE, 0xEF,
+                                  0x00, 0x11, 0x22, 0x33};
+    b[i++] = 0x9F;
+    b[i++] = 0x26;
+    b[i++] = 0x08;
+    memcpy(&b[i], AC8, 8);
+    i += 8;
+    // IAD copiado de la captura REAL de esta tarjeta (9F10=06011203A02000).
+    static const uint8_t IAD7[] = {0x06, 0x01, 0x12, 0x03, 0xA0, 0x20, 0x00};
+    b[i++] = 0x9F;
+    b[i++] = 0x10;
+    b[i++] = 0x07;
+    memcpy(&b[i], IAD7, 7);
+    i += 7;
+    rsp[0] = 0x77;
+    rsp[1] = (uint8_t)i;
+    memcpy(&rsp[2], b, i);
+    *rspLen = (unsigned short)(i + 2);
     emvAppendSw(rsp, rspLen, 0x90, 0x00);
     return;
   }
