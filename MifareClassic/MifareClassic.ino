@@ -31,6 +31,16 @@
  * control.poll() - and therefore the host's handshake - for as long as a
  * forgotten card sat on the reader (see beginCardRemovalWait()).
  *
+ * Fase 3 adds a PERSISTENT key-store: the user-curated Mifare keys that are
+ * not part of the embedded dictionary live in QSPI (through ConfigStore's
+ * TDBStore), so they survive a reset and feed the dictionary sweep - both
+ * `mifare check` and the on-detection auto-probe - without recompiling the
+ * firmware. `mifare keys add/remove/list/clear` manage it, and
+ * `mifare keys autostore on` makes a sweep persist the custom keys it
+ * confirms. The stored keys are tried BEFORE the embedded dictionary
+ * (custom-first fusion, Fase 3 Tarea 3.5); with an empty store the sweep is
+ * bit-identical to the Fase 1 baseline.
+ *
  * Distributed as-is; no warranty is given.
  */
 
@@ -38,12 +48,14 @@
 #include <string.h>
 
 #include <BomberCatControl.h>
+#include <ConfigStore.h>
 #include <HexUtils.h>
 #include <NfcController.h>
 #include <TagReader.h>
 
 #include "MifareClassic.h"
 #include "MifareCommands.h"
+#include "MifareKeyStore.h"
 
 NfcController nfc;
 
@@ -53,6 +65,15 @@ NfcController nfc;
 BomberCatControl control(Serial, BOMBERCAT_FW_VERSION, BOMBERCAT_FW_NAME);
 
 static bool tagSessionActive = false; // drives control.state()
+
+// Persistent key-store (Fase 3): user-curated Mifare Classic keys kept in
+// QSPI through ConfigStore's TDBStore, so they survive a reset and feed the
+// dictionary sweep (both `mifare check` and the on-detection auto-probe)
+// without recompiling the firmware. Only custom keys live here - the 32-key
+// embedded dictionary (MIFARE_CHECK_DICT) is compiled in and needs no
+// persistence.
+ConfigStore config;
+MifareKeyStore mifareKeys;
 
 // Block read back on every Mifare Classic detection for the legacy ":mifare"
 // session-open signal event (see probeMifareBlock()), matching
@@ -114,10 +135,17 @@ static const uint8_t MIFARE_CHECK_DICT_COUNT =
 // the host's `sector * 4` first-block mapping (1K = 16, 2K = 32 sectors — 4K's
 // 16-block sectors 32-39 are out of scope, same as the host CLI). The reuse
 // store and the --keys override are capped so both stay in bounded RAM.
+//
+// The confirmed-key pool (MIFARE_CHECK_KNOWN_MAX) holds THREE kinds of key:
+// the persisted key-store (up to MIFARE_KEYSTORE_MAX = 32), the keys confirmed
+// during the current sweep (up to 2 per sector, so 32 for a 1K card), and
+// their slack. 96 leaves room for all of them at once; with an empty key-store
+// the pool holds exactly the same keys as the Fase 1 baseline, so the
+// `attempts <= 66` pin is unaffected.
 static const uint8_t MIFARE_CHECK_DEFAULT_SECTORS = 16;
 static const uint8_t MIFARE_CHECK_MAX_SECTORS = 32;
 static const uint8_t MIFARE_CHECK_MAX_KEYS = 64;  // --keys override cap
-static const uint8_t MIFARE_CHECK_KNOWN_MAX = 64; // confirmed-key reuse cap
+static const uint8_t MIFARE_CHECK_KNOWN_MAX = 96; // confirmed-key pool cap
 
 // Settle pause after a re-select inside the on-device sweep, before the next
 // authentication. The host-driven sweep never needs this: one `mifare auth`
@@ -144,6 +172,17 @@ enum SweepResult { SWEEP_DONE, SWEEP_CARD_REMOVED };
 // without a global. keyA/keyB are valid only when haveA/haveB are true.
 typedef void (*SweepSectorSink)(uint8_t sector, bool haveA, const uint8_t *keyA,
                                 bool haveB, const uint8_t *keyB, void *ctx);
+
+// Auto-probe sink context: remembers the recovered Key A of the sector holding
+// MIFARE_PROBE_BLOCK, so the auto-probe can still emit the legacy block-4
+// ":mifare" data event as the host's session-open signal. Declared here, with
+// the other types, because the Arduino auto-generated prototypes come before
+// the Fase 2 section and would otherwise name an unknown type.
+struct AutoProbeCtx {
+  uint8_t probeSector; // sector containing MIFARE_PROBE_BLOCK
+  bool haveKeyA;
+  uint8_t keyA[6];
+};
 
 // Interactive "mifare ..." REPL session over an already-selected Mifare
 // card. Closes (blocking wait-for-removal + re-arm discovery) after this
@@ -195,6 +234,7 @@ void handleMifareRead(char *args);
 void handleMifareWrite(char *args);
 void handleMifareSector(char *args);
 void handleMifareCheck(char *args);
+void handleMifareKeys(char *args);
 void emitKnownKeys();
 
 void setup() {
@@ -210,6 +250,23 @@ void setup() {
       ;
   }
   Serial.println("Waiting for a Mifare Classic card...");
+
+  // Persistent key-store (Fase 3). A failure here is NOT fatal: the firmware
+  // keeps working with the embedded dictionary alone, it just cannot persist
+  // custom keys across resets - say so instead of failing silently.
+  mifareKeyStoreInit(mifareKeys);
+  if (config.begin()) {
+    if (mifareKeyStoreLoad(config, mifareKeys)) {
+      Serial.print("Mifare key-store: ");
+      Serial.print(mifareKeys.count);
+      Serial.println(" custom key(s) loaded.");
+    } else {
+      Serial.println("Mifare key-store: empty.");
+    }
+  } else {
+    Serial.println("Mifare key-store unavailable (flash init failed); custom "
+                   "keys will not persist.");
+  }
 
   BomberCatControl::Callbacks cb;
   cb.state = controlState;
@@ -602,9 +659,12 @@ void handleMifareSector(char *args) {
 // key) +OK. Indexed like `magcard list`'s ':cardN' lines - the host's
 // DeviceLink.command() collects ':key value' replies into a dict keyed by
 // name, so three lines sharing one ":mifare_key" key would collapse to the
-// last one instead of listing all three. Listing only - Decision 4's
-// persisted custom-key store (`mifare keys add/remove`, backed by
-// ConfigStore) is not implemented yet.
+// last one instead of listing all three.
+//
+// Fase 3: the persisted key-store (mifareKeys) is listed right after the
+// built-ins, continuing the SAME index sequence (:mifare_key3, :mifare_key4,
+// ...). The host reads the list with a "while mifare_key{i} in data" loop, so
+// the stored keys show up there with no host change at all.
 void emitKnownKeys() {
   replyKv("mifare_key0",
           String("default_ff ") +
@@ -615,6 +675,14 @@ void emitKnownKeys() {
   replyKv("mifare_key2",
           String("default_a0a1a2 ") +
               TagReader::hexCompact(MIFARE_DEFAULT_KEY_A0A1A2A3A4A5, 6));
+
+  // Stored (custom) keys, in the order they were added.
+  for (uint8_t i = 0; i < mifareKeys.count; i++) {
+    char key[16];
+    snprintf(key, sizeof(key), "mifare_key%u", (unsigned)(3 + i));
+    replyKv(key,
+            String("custom ") + TagReader::hexCompact(mifareKeys.keys[i], 6));
+  }
   replyOk();
 }
 
@@ -652,6 +720,58 @@ static void addKnownKey(uint8_t set[][6], uint8_t *count, const uint8_t *key) {
   }
   memcpy(set[*count], key, 6);
   (*count)++;
+}
+
+// Fase 3, Tarea 3.5 (fusion policy): seed the sweep's confirmed-key pool with
+// the persisted key-store, so a user-curated key is tried BEFORE the embedded
+// dictionary - a key the user added because it opened a card in the field is a
+// far better bet than a generic default. The keys the sweep confirms during
+// the run are appended after them, so the known-first reuse still works.
+//
+// With an empty key-store this seeds nothing and the sweep is bit-identical
+// to the Fase 1 baseline (`attempts` <= 66 on card_1k stays true).
+static uint8_t seedKnownFromStore(uint8_t known[][6], uint8_t maxCount) {
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < mifareKeys.count && n < maxCount; i++) {
+    memcpy(known[n], mifareKeys.keys[i], 6);
+    n++;
+  }
+  return n;
+}
+
+// Fase 3, Tareas 3.6 + 3.7: persist the keys a sweep confirmed that are NOT
+// part of the dictionary it swept - i.e. genuinely custom keys - so the next
+// card/session finds them without another sweep. Opt-in through
+// `mifare keys autostore on` (the flag is persisted with the store, so it
+// survives a reset).
+//
+// Wear: the whole record is rewritten, so this performs AT MOST one flash
+// write per sweep, and only when there is something new to save. Keys that
+// came from a dictionary are skipped - the embedded one always covers them,
+// and storing them would fill the store with noise.
+static void autostoreRecoveredKeys(const uint8_t dict[][6], uint8_t dictCount,
+                                   const uint8_t known[][6],
+                                   uint8_t knownCount) {
+  if ((mifareKeys.flags & MIFARE_KEYSTORE_FLAG_AUTOSTORE) == 0) {
+    return;
+  }
+  bool changed = false;
+  for (uint8_t i = 0; i < knownCount; i++) {
+    if (keyInSet(MIFARE_CHECK_DICT, MIFARE_CHECK_DICT_COUNT, known[i]) ||
+        keyInSet(dict, dictCount, known[i])) {
+      continue; // already covered by a dictionary
+    }
+    if (mifareKeyStoreIndexOf(mifareKeys, known[i]) >= 0) {
+      continue; // already stored
+    }
+    if (!mifareKeyStoreAdd(mifareKeys, known[i])) {
+      break; // store full - keep what we got
+    }
+    changed = true;
+  }
+  if (changed) {
+    mifareKeyStoreSave(config, mifareKeys);
+  }
 }
 
 // One sweep authentication with the same clean-session choreography the host's
@@ -795,14 +915,8 @@ static void checkSectorSink(uint8_t sector, bool haveA, const uint8_t *keyA,
 
 // --- Fase 2 auto-probe -------------------------------------------------------
 
-// Auto-probe sink context: remembers the recovered Key A of the sector holding
-// MIFARE_PROBE_BLOCK, so the auto-probe can still emit the legacy block-4
-// ":mifare" data event as the host's session-open signal.
-struct AutoProbeCtx {
-  uint8_t probeSector; // sector containing MIFARE_PROBE_BLOCK
-  bool haveKeyA;
-  uint8_t keyA[6];
-};
+// (AutoProbeCtx is declared with the other types near the top of the file,
+// because the Arduino auto-generated prototypes come before this section.)
 
 // On-detection auto-probe sink: stream each sector's recovered keys exactly
 // like `mifare check` (one wire format for both, parsed by the host in Fase 4)
@@ -817,48 +931,18 @@ static void autoProbeSectorSink(uint8_t sector, bool haveA, const uint8_t *keyA,
   }
 }
 
-// Fase 2 — complete on-detection auto-probe. Where the original probe tried
-// only 3 keys as Key A against a single block, this runs the full Fase 1 sweep:
-// Key A AND Key B across every default-card sector's header, over the embedded
-// default-key dictionary (Tareas 2.1/2.2/2.3), reusing runCardSweep so there is
-// one sweep implementation, not two (Tarea 2.4). Each sector's recovered keys
-// stream as :mifare_check_sN lines; then a single legacy ":mifare" block event
-// is emitted LAST as the session-open signal the host blocks on (session.py's
-// _wait_for_mifare_card matches "^:mifare\\s"). Emitting the per-sector lines
-// first and the signal line last lets the host drain the unsolicited sweep
-// output while it waits and start REPL commands on a clean stream. A card with
-// default keys still yields the exact block-4 data event the degenerate probe
-// did (no regression); a fully unknown card yields auth_fail. Read-only — never
-// writes automatically.
-void probeMifareBlock(uint32_t tsMs, const String &uidHex) {
-  // Confirmed-key reuse store. Fase 3 hook (Tarea 2.5): seed this from the
-  // persistent key-store before the sweep so custom keys feed the auto-probe.
-  uint8_t known[MIFARE_CHECK_KNOWN_MAX][6];
-  uint8_t knownCount = 0;
-  uint32_t attempts = 0, naive = 0;
-  uint8_t recovered = 0;
-
-  AutoProbeCtx ctx;
-  ctx.probeSector = MIFARE_PROBE_BLOCK / MIFARE_BLOCKS_PER_SECTOR;
-  ctx.haveKeyA = false;
-
-  if (runCardSweep(MIFARE_CHECK_DEFAULT_SECTORS, MIFARE_CHECK_DICT,
-                   MIFARE_CHECK_DICT_COUNT, known, &knownCount,
-                   autoProbeSectorSink, &ctx, &attempts, &naive,
-                   &recovered) == SWEEP_CARD_REMOVED) {
-    // Card lifted mid-probe: emit the signal so the host stops waiting, then
-    // let handleTagDetected() open the session — its idle/removal poll notices
-    // the absent card and re-arms discovery.
-    emitMifareEvent(tsMs, uidHex, MIFARE_PROBE_BLOCK, nullptr, 0, "auth_fail");
-    return;
-  }
-
-  // Legacy session-open signal: re-read MIFARE_PROBE_BLOCK with the Key A the
-  // sweep recovered for its sector, so a default-keyed card still produces the
-  // exact block-4 data event the degenerate probe did. The sweep left a warm
-  // Crypto1 session on the LAST swept sector, so tear it down first (a
-  // re-select) to keep this authentication independent — the same
-  // mifareCardAuthed choreography every other auth path uses.
+// Legacy session-open signal: re-read MIFARE_PROBE_BLOCK with the Key A the
+// sweep recovered for its sector, so a default-keyed card still produces the
+// exact block-4 data event the degenerate probe did. The sweep left a warm
+// Crypto1 session on the LAST swept sector, so tear it down first (a
+// re-select) to keep this authentication independent — the same
+// mifareCardAuthed choreography every other auth path uses.
+//
+// Split out of probeMifareBlock() so the signal is emitted BEFORE the
+// optional key-store flash write: that write can block the CPU for a few
+// hundred ms, and the host is waiting for this exact line.
+static void emitMifareSessionSignal(uint32_t tsMs, const String &uidHex,
+                                    const AutoProbeCtx &ctx) {
   if (ctx.haveKeyA) {
     if (mifareCardAuthed) {
       mifareCardAuthed = false;
@@ -882,6 +966,54 @@ void probeMifareBlock(uint32_t tsMs, const String &uidHex) {
     mifareReselect(nfc);
   }
   emitMifareEvent(tsMs, uidHex, MIFARE_PROBE_BLOCK, nullptr, 0, "auth_fail");
+}
+
+// Fase 2 — complete on-detection auto-probe. Where the original probe tried
+// only 3 keys as Key A against a single block, this runs the full Fase 1 sweep:
+// Key A AND Key B across every default-card sector's header, over the embedded
+// default-key dictionary (Tareas 2.1/2.2/2.3), reusing runCardSweep so there is
+// one sweep implementation, not two (Tarea 2.4). Each sector's recovered keys
+// stream as :mifare_check_sN lines; then a single legacy ":mifare" block event
+// is emitted LAST as the session-open signal the host blocks on (session.py's
+// _wait_for_mifare_card matches "^:mifare\\s"). Emitting the per-sector lines
+// first and the signal line last lets the host drain the unsolicited sweep
+// output while it waits and start REPL commands on a clean stream. A card with
+// default keys still yields the exact block-4 data event the degenerate probe
+// did (no regression); a fully unknown card yields auth_fail. Read-only — never
+// writes automatically.
+void probeMifareBlock(uint32_t tsMs, const String &uidHex) {
+  // Confirmed-key reuse store, seeded with the persisted key-store (Fase 3,
+  // Tarea 3.5) so the custom keys the user added are tried first.
+  uint8_t known[MIFARE_CHECK_KNOWN_MAX][6];
+  uint8_t knownCount = seedKnownFromStore(known, MIFARE_CHECK_KNOWN_MAX);
+  uint32_t attempts = 0, naive = 0;
+  uint8_t recovered = 0;
+
+  AutoProbeCtx ctx;
+  ctx.probeSector = MIFARE_PROBE_BLOCK / MIFARE_BLOCKS_PER_SECTOR;
+  ctx.haveKeyA = false;
+
+  if (runCardSweep(MIFARE_CHECK_DEFAULT_SECTORS, MIFARE_CHECK_DICT,
+                   MIFARE_CHECK_DICT_COUNT, known, &knownCount,
+                   autoProbeSectorSink, &ctx, &attempts, &naive,
+                   &recovered) == SWEEP_CARD_REMOVED) {
+    // Card lifted mid-probe: emit the signal so the host stops waiting, then
+    // let handleTagDetected() open the session — its idle/removal poll notices
+    // the absent card and re-arms discovery.
+    emitMifareEvent(tsMs, uidHex, MIFARE_PROBE_BLOCK, nullptr, 0, "auth_fail");
+    return;
+  }
+
+  // The session-open signal goes out FIRST: the host is blocked waiting for
+  // it, and the (optional) key-store flash write below can take a few
+  // hundred ms with the CPU busy.
+  emitMifareSessionSignal(tsMs, uidHex, ctx);
+
+  // Persist any custom key the sweep just confirmed (opt-in; at most one
+  // flash write per sweep). After the signal on purpose: the write must not
+  // delay - nor disturb - the session the host is about to use.
+  autostoreRecoveredKeys(MIFARE_CHECK_DICT, MIFARE_CHECK_DICT_COUNT, known,
+                         knownCount);
 }
 
 // `mifare check [--sectors <n>] [--keys <hex,...>]`
@@ -939,10 +1071,11 @@ void handleMifareCheck(char *args) {
     }
   }
 
-  // Confirmed-key reuse store, ordered by first confirmation (known-first).
-  // Fase 3 hook (Tarea 2.5): seed this from the persistent key-store here.
+  // Confirmed-key reuse store, ordered by first confirmation (known-first),
+  // seeded with the persisted key-store (Fase 3, Tarea 3.5) so the custom
+  // keys are tried before the dictionary.
   uint8_t known[MIFARE_CHECK_KNOWN_MAX][6];
-  uint8_t knownCount = 0;
+  uint8_t knownCount = seedKnownFromStore(known, MIFARE_CHECK_KNOWN_MAX);
 
   uint32_t attempts = 0; // real auths issued (Tarea 1.8: pin against baseline)
   uint32_t naive = 0;    // auths a no-reuse, no-early-cut sweep would cost
@@ -972,6 +1105,182 @@ void handleMifareCheck(char *args) {
   // give a follow-up REPL command the full window again.
   mifareSessionDeadline = millis() + MIFARE_SESSION_IDLE_MS;
   replyOk();
+
+  // Persist any custom key this sweep just confirmed (opt-in; at most one
+  // flash write per sweep). The keys that came from a dictionary are skipped -
+  // they are already covered. AFTER the reply on purpose: the write can take
+  // a few hundred ms and must not delay the host's answer, nor disturb the
+  // card session the host is about to use.
+  autostoreRecoveredKeys(dict, dictCount, known, knownCount);
+}
+
+// --- `mifare keys ...` persistent key-store (Fase 3) ------------------------
+//
+// `mifare keys`                     -> list the built-in + stored keys
+// `mifare keys list`                -> same
+// `mifare keys add <key_hex12>`     -> persist a custom key (survives a reset)
+// `mifare keys remove <key_hex12|index>` -> drop a stored key
+// `mifare keys clear`               -> drop every stored key
+// `mifare keys autostore on|off`    -> auto-persist the custom keys a sweep
+//                                       confirms (Tarea 3.6)
+//
+// Wire format (docs/baseline_fase0_mifare/serial_log_format.md): the listing
+// keeps ONE index sequence - :mifare_key0..2 are the compiled-in defaults,
+// :mifare_key3.. are the stored ones - so the host's "while mifare_key{i} in
+// data" loop lists every key with no change on the host side.
+//
+// Needs no card: the key-store is a device-side setting, like `mifare keys`
+// itself.
+
+// True when `tok` is a non-empty decimal number; writes it to *index.
+static bool parseDecimalIndex(const char *tok, int *index) {
+  if (tok == nullptr || tok[0] == '\0') {
+    return false;
+  }
+  for (const char *p = tok; *p != '\0'; p++) {
+    if (!isdigit((unsigned char)*p)) {
+      return false;
+    }
+  }
+  *index = atoi(tok);
+  return true;
+}
+
+// `mifare keys ...` dispatch. See the section header for the sub-commands.
+void handleMifareKeys(char *args) {
+  char *sub = nextArg(&args);
+  if (sub == nullptr || strcmp(sub, "list") == 0) {
+    emitKnownKeys();
+    return;
+  }
+
+  if (strcmp(sub, "add") == 0) {
+    char *keyHex = nextArg(&args);
+    uint8_t key[6];
+    if (keyHex == nullptr || !parseHexBytes(keyHex, key, 6)) {
+      replyErr("usage: mifare keys add <key_hex12>");
+      return;
+    }
+    if (keyInSet(MIFARE_CHECK_DICT, MIFARE_CHECK_DICT_COUNT, key)) {
+      replyErr("key is already in the built-in dictionary");
+      return;
+    }
+    if (mifareKeyStoreIndexOf(mifareKeys, key) >= 0) {
+      replyErr("key is already stored");
+      return;
+    }
+    MifareKeyStore backup = mifareKeys;
+    if (!mifareKeyStoreAdd(mifareKeys, key)) {
+      replyErr("key store is full");
+      return;
+    }
+    if (!mifareKeyStoreSave(config, mifareKeys)) {
+      mifareKeys = backup; // keep RAM and flash in sync
+      replyErr("could not persist the key store (flash write failed)");
+      return;
+    }
+    replyOk(String("added ") + TagReader::hexCompact(key, 6));
+    return;
+  }
+
+  if (strcmp(sub, "remove") == 0) {
+    char *target = nextArg(&args);
+    if (target == nullptr) {
+      replyErr("usage: mifare keys remove <key_hex12|index>");
+      return;
+    }
+    int index;
+    if (strlen(target) == 12) {
+      uint8_t key[6];
+      if (!parseHexBytes(target, key, 6)) {
+        replyErr("usage: mifare keys remove <key_hex12|index>");
+        return;
+      }
+      index = mifareKeyStoreIndexOf(mifareKeys, key);
+      if (index < 0) {
+        replyErr("key is not in the key store");
+        return;
+      }
+    } else if (parseDecimalIndex(target, &index)) {
+      // Index into the listing printed by `mifare keys`: 0..2 are the
+      // compiled-in defaults (not removable), 3+ are the stored keys.
+      if (index < 3) {
+        replyErr("built-in default keys cannot be removed");
+        return;
+      }
+      index -= 3;
+      if (index >= mifareKeys.count) {
+        replyErr("index out of range");
+        return;
+      }
+    } else {
+      replyErr("usage: mifare keys remove <key_hex12|index>");
+      return;
+    }
+    uint8_t removed[6];
+    memcpy(removed, mifareKeys.keys[index], 6);
+    MifareKeyStore backup = mifareKeys;
+    mifareKeyStoreRemoveAt(mifareKeys, (uint8_t)index);
+    if (!mifareKeyStoreSave(config, mifareKeys)) {
+      mifareKeys = backup; // keep RAM and flash in sync
+      replyErr("could not persist the key store (flash write failed)");
+      return;
+    }
+    replyOk(String("removed ") + TagReader::hexCompact(removed, 6));
+    return;
+  }
+
+  if (strcmp(sub, "clear") == 0) {
+    if (mifareKeys.count == 0) {
+      replyOk("key store is already empty");
+      return;
+    }
+    MifareKeyStore backup = mifareKeys;
+    mifareKeyStoreClearKeys(mifareKeys);
+    if (!mifareKeyStoreSave(config, mifareKeys)) {
+      mifareKeys = backup; // keep RAM and flash in sync
+      replyErr("could not persist the key store (flash write failed)");
+      return;
+    }
+    replyOk("key store cleared");
+    return;
+  }
+
+  if (strcmp(sub, "autostore") == 0) {
+    char *mode = nextArg(&args);
+    if (mode == nullptr) {
+      replyOk(
+          String("autostore ") +
+          ((mifareKeys.flags & MIFARE_KEYSTORE_FLAG_AUTOSTORE) ? "on" : "off"));
+      return;
+    }
+    uint8_t flags = mifareKeys.flags;
+    if (strcmp(mode, "on") == 0) {
+      flags |= MIFARE_KEYSTORE_FLAG_AUTOSTORE;
+    } else if (strcmp(mode, "off") == 0) {
+      flags &= (uint8_t)~MIFARE_KEYSTORE_FLAG_AUTOSTORE;
+    } else {
+      replyErr("usage: mifare keys autostore [on|off]");
+      return;
+    }
+    if (flags == mifareKeys.flags) {
+      // Nothing changed: do NOT rewrite the flash record (wear).
+      replyOk(String("autostore ") + (flags ? "on" : "off"));
+      return;
+    }
+    MifareKeyStore backup = mifareKeys;
+    mifareKeys.flags = flags;
+    if (!mifareKeyStoreSave(config, mifareKeys)) {
+      mifareKeys = backup; // keep RAM and flash in sync
+      replyErr("could not persist the key store (flash write failed)");
+      return;
+    }
+    replyOk(String("autostore ") + (flags ? "on" : "off"));
+    return;
+  }
+
+  replyErr("usage: mifare keys [list|add <key_hex12>|remove <key_hex12|index>"
+           "|clear|autostore [on|off]]");
 }
 
 // `mifare <auth|read|write|sector|keys|check> ...` dispatch. `keys` needs no
@@ -984,7 +1293,7 @@ void handleMifareCommand(char *args) {
   }
 
   if (strcmp(sub, "keys") == 0) {
-    emitKnownKeys();
+    handleMifareKeys(args);
     return;
   }
 

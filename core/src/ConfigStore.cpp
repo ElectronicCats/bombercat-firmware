@@ -89,3 +89,37 @@ bool ConfigStore::clear() {
   int rc = _store->remove(kRelayKey);
   return rc == MBED_SUCCESS || rc == MBED_ERROR_ITEM_NOT_FOUND;
 }
+
+bool ConfigStore::loadBlob(const char *key, void *buf, size_t size) {
+  if (!_ready || key == nullptr || buf == nullptr || size == 0)
+    return false;
+
+  size_t actual = 0;
+  int rc = _store->get(key, buf, size, &actual);
+  if (rc != MBED_SUCCESS || actual != size) {
+    // Missing, or a record written with a different layout: the caller
+    // falls back to its own defaults instead of reading garbage.
+    return false;
+  }
+  return true;
+}
+
+bool ConfigStore::saveBlob(const char *key, const void *buf, size_t size) {
+  if (!_ready || key == nullptr || buf == nullptr || size == 0)
+    return false;
+  return _store->set(key, buf, size, 0) == MBED_SUCCESS;
+}
+
+bool ConfigStore::hasBlob(const char *key) {
+  if (!_ready || key == nullptr)
+    return false;
+  TDBStore::info_t info;
+  return _store->get_info(key, &info) == MBED_SUCCESS;
+}
+
+bool ConfigStore::clearBlob(const char *key) {
+  if (!_ready || key == nullptr)
+    return false;
+  int rc = _store->remove(key);
+  return rc == MBED_SUCCESS || rc == MBED_ERROR_ITEM_NOT_FOUND;
+}
