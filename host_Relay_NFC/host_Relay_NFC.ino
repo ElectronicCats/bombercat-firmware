@@ -51,7 +51,7 @@ using namespace mbed;
 
 // Get limits of the In Application Program (IAP) flash, ie. the internal MCU
 // flash.
-#include "FlashIAPLimits.h"
+#include <FlashIAPLimits.h> // from BomberCatCore (core/src)
 auto iapLimits{getFlashIAPLimits()};
 
 // Create a block device on the available space of the FlashIAP
