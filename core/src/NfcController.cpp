@@ -2,6 +2,12 @@
 
 #include "Log.h"
 
+// How long the chip may wait for the host's answer to a discovery
+// notification before the host answers it anyway. The vendor library waits
+// for the NEXT discovery notification (one per endpoint); a card with a
+// single endpoint never sends one, so the wait has to end on its own.
+static const uint32_t DISCOVER_SELECT_GRACE_MS = 150;
+
 NfcController::NfcController(uint8_t irqPin, uint8_t venPin, uint8_t i2cAddress,
                              ChipModel chipModel)
     : _nfc(irqPin, venPin, i2cAddress, chipModel) {}
@@ -56,18 +62,56 @@ bool NfcController::reset() {
   // the polarity matches the known-good firmware regardless of return type.
   if (_nfc.connectNCI()) {
     LOG_ERROR("NFC: connectNCI failed, check connections");
+    resetFailures++;
     return false;
   }
   if (_nfc.configureSettings()) {
     LOG_ERROR("NFC: configureSettings failed");
+    resetFailures++;
     return false;
   }
   if (_nfc.configMode()) {
     LOG_ERROR("NFC: configMode failed");
+    resetFailures++;
     return false;
   }
   _nfc.startDiscovery();
   return true;
+}
+
+// RF_DISCOVER_SELECT_CMD: "pick this endpoint and activate it".
+//
+// The chip sends RF_DISCOVER_NTF (0x61 0x03) when it FOUND a card but
+// still waits for the host to choose it; only after the select does the
+// activation (RF_INTF_ACTIVATED_NTF, 0x61 0x05) arrive (UM10936 §6.4, the
+// RFST_W4_HOST_SELECT state). The vendor library does exactly this - its
+// WaitForDiscoveryNotification() answers a discovery notification with this
+// command. Our wait used to DRAIN that notification instead, so whenever the
+// chip took that path the activation never came and the wait expired as if
+// the card had left the field - which is what aborted the on-device sweep.
+//
+// Same frame the library builds: RF_DISCOVER_SELECT_CMD (0x21 0x04), one
+// discovery configuration, protocol + interface. The interface is the one the
+// library pairs with each protocol.
+static void sendDiscoverSelect(NfcController &nfc, uint8_t protocolByte) {
+  uint8_t interface;
+  switch (protocolByte) {
+  case 0x04: // ISODEP
+    interface = 0x02;
+    break;
+  case 0x05: // NFCDEP
+    interface = 0x03;
+    break;
+  case 0x80: // MIFARE (TAGCMD)
+    interface = 0x80;
+    break;
+  default:
+    interface = 0x01; // FRAME
+    break;
+  }
+  const uint8_t protocol = (protocolByte == 0) ? 0 : protocolByte;
+  uint8_t select[6] = {0x21, 0x04, 0x03, 0x01, protocol, interface};
+  (void)nfc.raw().writeData(select, sizeof(select));
 }
 
 // Order matters: connectNCI() (inside reset()) is what pulses VEN and calls
@@ -127,15 +171,35 @@ bool NfcController::waitForTag(uint16_t timeoutMs) {
   // (0x61 0x03) is handed back to the library, which owns that sequence.
   const uint32_t deadline = millis() + timeoutMs;
   uint8_t buf[MAX_NCI_FRAME_SIZE];
+  // A discovery notification pending: the chip found a card and waits for the
+  // host to select it. The vendor library waits for the NEXT discovery
+  // notification before answering (the chip sends one per endpoint) and
+  // falls back to a short grace period when there is no second one.
+  uint8_t discoverProtocol = 0;
+  uint32_t discoverAt = 0;
   waitTagCalls++;
   while ((int32_t)(millis() - deadline) < 0) {
     if (!_nfc.hasMessage()) {
       delay(1);
+      // Nothing to read: if a discovery notification is still unanswered,
+      // answer it now (the chip has been waiting for the select).
+      if (discoverProtocol != 0 &&
+          (int32_t)(millis() - discoverAt) >= DISCOVER_SELECT_GRACE_MS) {
+        sendDiscoverSelect(*this, discoverProtocol);
+        waitTagSelects++;
+        discoverProtocol = 0;
+      }
       continue;
     }
     const uint32_t n = _nfc.readData(buf);
     if (n == 0) {
       delay(1);
+      continue;
+    }
+    if (buf[0] == 0x41) {
+      // A CORE error response: the chip refused a command (out of sequence).
+      // It says nothing about the card being there.
+      waitTagErrors++;
       continue;
     }
     if (buf[0] != 0x61) {
@@ -158,13 +222,27 @@ bool NfcController::waitForTag(uint16_t timeoutMs) {
       waitTagOk++;
       return true;
     }
-    // Anything else (a credit, a discovery notification that would need the
-    // library's SELECT sequence, a deactivation) is drained and the wait
-    // continues. The library's own wait is NOT used here on purpose: it loops
-    // until the activation arrives with no deadline of its own, and that loop
-    // is what wedged the board. In this flow (a MIFARE card in reader mode)
-    // the activation is the only notification that shows up — the counter
-    // below measured zero of anything else in 100+ waits.
+    if (buf[1] == 0x03) {
+      // RF_DISCOVER_NTF: the chip FOUND a card but it still has to be
+      // SELECTed before the activation arrives. Answer it the way the
+      // vendor library does (RF_DISCOVER_SELECT_CMD); before this, the
+      // notification was drained and the wait expired as if the card had
+      // left the field.
+      waitTagDiscovery++;
+      waitTagNotifications++;
+      discoverProtocol = buf[4];
+      discoverAt = millis();
+      continue;
+    }
+    if (buf[1] == 0x06) {
+      // RF_DEACTIVATE_NTF: the card left the field (or the discovery was
+      // torn down).
+      waitTagDeactivate++;
+      waitTagNotifications++;
+      continue;
+    }
+    // Anything else (a credit, another notification we do not care about) is
+    // drained and the wait continues.
     waitTagNotifications++;
   }
   waitTagTimeout++;
