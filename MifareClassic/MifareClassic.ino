@@ -64,8 +64,8 @@
 #include "MifareClassic.h"
 #include "MifareCommands.h"
 #include "MifareKeyStore.h"
-#include "MifareResultStore.h"
 #include "MifareStandaloneTrigger.h"
+#include <MifareResultStore.h>
 
 NfcController nfc;
 
