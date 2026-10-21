@@ -118,11 +118,23 @@ con la Key B ya rellena (el host se queda con la última línea por sector):
 
 ```
 :mifare_check_stat attempts=79 naive=1024 recovered=32/32 trailer=0 cached=0
+                 aborted=0
                  auth_ms=1229 reselect_ms=6177 reset_ms=5085 detect_ms=1092 trailer_ms=0
 ```
 
 - `attempts=` / `naive=` / `recovered=` — como hasta ahora (el pin de no
   regresión es `attempts ≤ 66` en la `card_1k`).
+- `naive=` — la proyección HONESTA del barrido completo: cada slot
+  (sector × {A,B}) probando el diccionario entero, sin reutilización ni corte
+  temprano. Se declara por adelantado (`sectores × 2 × claves`), no se acumula
+  slot a slot, para que un barrido interrumpido siga reportando el coste del
+  barrido que debía hacer.
+- `aborted=0|1` — `1` cuando el barrido se interrumpió antes de cubrir todos
+  los sectores (la tarjeta se fue del campo, o los re-selects se rindieron).
+  Las líneas por sector son entonces un resultado **parcial**: los sectores que
+  el barrido no alcanzó son desconocidos porque el barrido se detuvo, no
+  porque las claves no existan. Un firmware viejo no tiene este campo → el
+  host no puede distinguirlo y trata el resultado como completo.
 - `trailer=` — lecturas de trailer que hizo el barrido (ver arriba).
 - `cached=0|1` — `1` cuando la respuesta viene del **barrido en caché**: el
   firmware ya había barrido esa tarjeta (la auto-prueba de detección lo hace
@@ -145,15 +157,58 @@ con la Key B ya rellena (el host se queda con la última línea por sector):
 Contadores acumulados del board, para medir sin cronómetro:
 
 ```
-:mifare_timing attempts=79 reselects=78 auth_ms=1231 reselect_ms=6177
-                reset_ms=5085 detect_ms=1092 trailer_ms=0
-                det_calls=80 det_ok=80 det_timeout=0 det_ntf=0
+:mifare_timing attempts=79 reselects=78 reselect_fails=1 auth_ms=1231
+                reselect_ms=6177 reset_ms=5085 detect_ms=1092 trailer_ms=0
+                det_calls=80 det_ok=79 det_timeout=1 det_ntf=0
+                det_disc=0 det_sel=0 det_deact=0 det_err=0 rst_fail=0
 ```
 
 - `det_calls` / `det_ok` / `det_timeout` / `det_ntf` — diagnóstico de la
   detección: cuántas esperas, cuántas encontraron la tarjeta, cuántas
   expiraron y cuántas notificaciones ajenas se drenaron. Sirven para
   distinguir "la tarjeta se fue" de "se perdió la notificación".
+- `det_disc` / `det_sel` — `RF_DISCOVER_NTF` (0x61 0x03): el chip **encontró**
+  la tarjeta pero espera a que el host la **seleccione**. `det_sel` cuenta los
+  `RF_DISCOVER_SELECT_CMD` enviados como respuesta. Antes de esto, esa
+  notificación se descartaba: la activación (0x61 0x05) no llegaba nunca y la
+  espera expiraba como si la tarjeta se hubiera ido.
+- `det_deact` — `RF_DEACTIVATE_NTF` (0x61 0x06): la tarjeta se fue.
+- `det_err` — respuesta de error del chip (0x41): rechazó una orden.
+- `rst_fail` — el **re-arm del lector** falló por I²C. Un re-arm fallido NO es
+  "la tarjeta se fue".
+- `reselect_fails` — de los re-selects del barrido, cuántos **no** recuperaron
+  la tarjeta. Con `det_*` y `rst_fail` dan la causa exacta de un barrido
+  interrumpido.
+
+### el re-select y el settle del barrido on-device (corregido)
+
+El barrido on-device hace un re-select **después de cada clave equivocada**
+(la autenticación fallida deja la tarjeta en HALT). Dos parámetros deciden si
+ese re-select funciona:
+
+- **la ventana de detección** (2000 ms, `MIFARE_CHECK_RESELECT_MS`): la
+  tarjeta está en HALT y el PN7150 tiene que despertarla y volver a activarla,
+  que tarda más que una re-detección en caliente. Antes el barrido usaba el
+  valor por defecto de `waitForTag()` (**500 ms**) —justo el camino que hace
+  un re-select tras cada clave fallida era el que menos tiempo le daba a la
+  tarjeta— mientras que `mifareReselect()` sí tenía los 2000 ms.
+- **el settle** (25 ms, `MIFARE_CHECK_SETTLE_MS`, ajustable en caliente con
+  `mifare check --settle <ms>`): el reposo entre el re-select y la siguiente
+  autenticación. El camino del host lo recibe gratis en su round-trip USB
+  (10-30 ms); el barrido on-device tiene que pedirlo explícitamente. Con 5 ms
+  el chip todavía no está listo y la clave CORRECTA se lee como fallo.
+
+Un re-select fallido **no** significa que la tarjeta se fue: el chip puede
+perder el despertar de la tarjeta, o el re-init por I²C puede toser, con la
+tarjeta ahí mismo. Por eso el re-select se reintenta (3 veces) antes de
+creer que la tarjeta se fue — el barrido no puede ser más estricto que la
+sonda de retirada (`MIFARE_REMOVAL_MISSES_TO_CONFIRM`), o un solo fallo
+tira la tarjeta entera.
+
+Sin estas tres correcciones, una tarjeta que por el camino del host da 15/16
+sectores por el camino on-device salía como "1/16 sectores con claves
+conocidas": el barrido se rendía a mitad y el host recibía el resultado
+parcial como si fuera la tarjeta entera.
 
 ### el dump on-device (Fase 4, tarea 4.4 — implementado)
 

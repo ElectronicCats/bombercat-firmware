@@ -159,7 +159,43 @@ static const uint8_t MIFARE_CHECK_KNOWN_MAX = 96; // confirmed-key pool cap
 // that rest on the sweep path only (not in mifareReselect(), so the host path
 // keeps its speed). It does NOT count as an authentication, so the baseline
 // pin (attempts <= 66 on card_1k) is unaffected.
-static const uint8_t MIFARE_CHECK_SETTLE_MS = 5;
+//
+// The value is the host path's EFFECTIVE rest, measured: the USB round-trip
+// between two `mifare auth` commands is 10-30 ms (the host parses the reply
+// and writes the next command). 5 ms was below what the chip actually needs,
+// so the on-device sweep kept hitting the race the comment above describes -
+// and on a card whose sectors are NOT opened by the first keys of the
+// dictionary it did not stay a single false hole: every spurious failure HALTs
+// the card again, so the chip never settles, the re-selects get slower and
+// the sweep eventually gives up mid-card (the card is then reported as
+// "1/16 sectors known" although the very same card yields 15/16 through the
+// host path). 25 ms matches what the host path gets for free; the cost is
+// 25 ms per attempt, i.e. ~2 s on a 79-attempt sweep.
+static const uint8_t MIFARE_CHECK_SETTLE_MS = 25;
+
+// How long the sweep's re-select waits for the card to come back.
+//
+// The sweep re-selects after EVERY failed authentication, and a failed
+// authentication HALTs the card: the PN7150 has to wake it up and activate it
+// again, which takes longer than a warm re-detection. mifareReselect() was
+// given a 2000 ms window for exactly that reason (Fase 4, Sesión 11) - but
+// the sweep did NOT go through it: timedReselect() called
+// nfc.waitForTag() with its DEFAULT 500 ms window, so the sweep - the ONE
+// path that re-selects after every wrong key - was the one that gave the card
+// the least time to come back. A card that needs a little longer than 500 ms
+// was declared "gone", and the sweep threw the whole card away.
+static const uint16_t MIFARE_CHECK_RESELECT_MS = 2000;
+
+// How many times the sweep re-tries the re-select before it believes the card
+// really left the field.
+//
+// ONE failed re-select is NOT proof: the chip can miss the wake-up, or the
+// I2C re-init (nfc.reset() pulses VEN and re-inits the chip) can hiccup,
+// while the card is right there on the reader. The removal probe already
+// needs several consecutive misses to believe the card is gone
+// (MIFARE_REMOVAL_MISSES_TO_CONFIRM); the sweep must not be STRICTER than
+// the removal probe, or a single hiccup costs the whole card.
+static const uint8_t MIFARE_CHECK_RESELECT_TRIES = 3;
 
 // Runtime override of the settle pause (`mifare check --settle <ms>`), so the
 // value can be tuned ON THE HARDWARE without reflashing - the settle is the
@@ -186,6 +222,11 @@ static uint32_t mifareSweepDetectMs = 0;
 static uint32_t mifareSweepTrailerMs = 0;
 static uint32_t mifareSweepAttempts = 0;
 static uint32_t mifareSweepReselects = 0;
+// How many re-selects did NOT get the card back. Together with the core's
+// det_* counters it says whether the card left the field or the re-select
+// simply failed to recover it (the difference between "the user took the
+// card away" and "the chip hiccupped").
+static uint32_t mifareSweepReselectFails = 0;
 
 // Outcome of one trailer read (Fase 4, tarea 4.4). Declared here, with the
 // other types, because the Arduino auto-generated prototypes come before the
@@ -297,6 +338,12 @@ static uint32_t mifareSweepCacheAttempts = 0;
 static uint32_t mifareSweepCacheNaive = 0;
 static uint8_t mifareSweepCacheRecovered = 0;
 static uint8_t mifareSweepCacheTrailer = 0;
+// True when the cached sweep was interrupted (the card left the field, or the
+// re-selects gave up) before it covered every sector. The host has to say so:
+// the cached per-sector lines are then a PARTIAL result, and reporting them
+// as the whole card is what made an interrupted sweep look like a card whose
+// keys are unknown.
+static bool mifareSweepCacheAborted = false;
 // The wall-clock split OF THAT SWEEP, cached with it: the global counters keep
 // accumulating whatever else the board did afterwards (a host-driven sweep
 // adds its own authentications to them), so a cached answer has to report the
@@ -338,6 +385,7 @@ const char *controlState();
 bool bomberCatCommand(const char *verb, char *args);
 void handleMifareCommand(char *args);
 bool mifareBeginAuth();
+static bool sweepReselect(NfcController &nfc);
 void handleMifareAuth(char *args);
 void handleMifareRead(char *args);
 void handleMifareWrite(char *args);
@@ -745,11 +793,20 @@ static bool timedReselect(NfcController &nfc) {
   mifareSweepResetMs += t1 - t0;
   if (!armed) {
     mifareSweepReselectMs += millis() - t0;
+    mifareSweepReselectFails++;
     return false;
   }
-  const bool detected = nfc.waitForTag();
+  // The SAME window mifareReselect() uses (2000 ms): the card was HALTed by
+  // the failed authentication, so waking it up takes longer than a warm
+  // re-detection. waitForTag()'s default (500 ms) is what this call used
+  // before, and it was the wrong window for the wrong path - see
+  // MIFARE_CHECK_RESELECT_MS.
+  const bool detected = nfc.waitForTag(MIFARE_CHECK_RESELECT_MS);
   mifareSweepDetectMs += millis() - t1;
   mifareSweepReselectMs += millis() - t0;
+  if (!detected) {
+    mifareSweepReselectFails++;
+  }
   return detected;
 }
 
@@ -788,12 +845,13 @@ void handleMifareAuth(char *args) {
     // A wrong key HALTs the card. Re-select it before answering so the host's
     // NEXT dictionary attempt starts clean — without this, one wrong key (e.g.
     // FFFFFFFFFFFF on a sector keyed A0A1A2A3A4A5) dooms the whole sweep and
-    // `mifare check` reports every key as failing. mifareReselect() returns
-    // false only when no card is in the field, which distinguishes a real
-    // wrong-key from a removed card: end the session and re-arm in that case so
-    // the host's next command correctly gets "no card selected" instead of a
-    // misleading auth failure. See CLI_IMPROVEMENTS_MifareCheck.md §4.
-    if (!timedReselect(nfc)) {
+    // `mifare check` reports every key as failing. sweepReselect() returns
+    // false only when several consecutive re-selects prove the card is gone,
+    // which distinguishes a real wrong-key from a removed card: end the
+    // session and re-arm in that case so the host's next command correctly
+    // gets "no card selected" instead of a misleading auth failure. See
+    // CLI_IMPROVEMENTS_MifareCheck.md §4.
+    if (!sweepReselect(nfc)) {
       beginCardRemovalWait();
       replyErr("card removed, tap a card again");
       return;
@@ -1013,20 +1071,42 @@ static void autostoreRecoveredKeys(const uint8_t dict[][6], uint8_t dictCount,
   }
 }
 
+// The sweep's re-select, with retries.
+//
+// A single failed re-select does NOT mean the card left the field: the chip
+// can miss the card's wake-up, or the I2C re-init can hiccup, while the card
+// is right there on the reader. The removal probe already needs several
+// consecutive misses before it believes the card is gone
+// (MIFARE_REMOVAL_MISSES_TO_CONFIRM) - the sweep must not be stricter, or a
+// single hiccup throws away every sector the sweep has not reached yet.
+//
+// This is what turned a card that yields 15/16 sectors through the host path
+// into a "1/16 sectors known" card through the device path: the sweep gave
+// up on the first hiccup and the host was then told the partial result as if
+// it were the whole card.
+static bool sweepReselect(NfcController &nfc) {
+  for (uint8_t i = 0; i < MIFARE_CHECK_RESELECT_TRIES; i++) {
+    if (timedReselect(nfc)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // One sweep authentication with the same clean-session choreography the host's
 // `mifare auth` uses. Before the attempt, tear down any warm Crypto1 session
 // left by a prior success (or the auto-probe) via a re-select, so this auth is
 // evaluated independently instead of riding the open session — the Key B ==
 // Key A false hit documented at mifareCardAuthed / mifareBeginAuth(). After a
 // wrong key (which HALTs the card) re-select so the next attempt starts clean.
-// Sets *removed = true and returns false when a re-select proves the card left
-// the field. Returns true on a real successful auth (card left warm).
+// Sets *removed = true and returns false when the re-selects prove the card
+// left the field. Returns true on a real successful auth (card left warm).
 static bool sweepAuth(uint8_t block, uint8_t keyType, const uint8_t *key,
                       uint32_t *attempts, bool *removed) {
   *removed = false;
   if (mifareCardAuthed) {
     mifareCardAuthed = false;
-    if (!timedReselect(nfc)) {
+    if (!sweepReselect(nfc)) {
       *removed = true;
       return false;
     }
@@ -1041,7 +1121,7 @@ static bool sweepAuth(uint8_t block, uint8_t keyType, const uint8_t *key,
     mifareCardAuthed = true; // leave warm; next sweepAuth tears it down
     return true;
   }
-  if (timedReselect(nfc)) {     // recover the HALTed card before the next key
+  if (sweepReselect(nfc)) {     // recover the HALTed card before the next key
     delay(mifareCheckSettleMs); // same rest the USB-paced host path gets
   } else {
     *removed = true;
@@ -1153,6 +1233,7 @@ static void sweepCacheGet(uint8_t sector, bool *haveA, const uint8_t **keyA,
 static void sweepCacheInvalidate() {
   mifareSweepValid = false;
   mifareSweepSectors = 0;
+  mifareSweepCacheAborted = false;
   memset(mifareSweepHave, 0, sizeof(mifareSweepHave));
 }
 
@@ -1183,6 +1264,13 @@ static SweepResult runCardSweep(uint8_t sectors, const uint8_t dict[][6],
   mifareSweepTrailerMs = 0;
   mifareSweepAttempts = 0;
   mifareSweepReselects = 0;
+  // The naive baseline is the PROJECTION of the whole sweep - every slot
+  // trying the whole dictionary, with no reuse shortcut and no early cut -
+  // and it is declared UP FRONT, not accumulated slot by slot. A sweep that
+  // gives up half-way still reports the honest cost of the sweep it was
+  // supposed to run, and the "auths saved" ratio stays meaningful instead of
+  // comparing a truncated attempt count with a full projection.
+  *naive = (uint32_t)sectors * 2 * dictCount;
   for (uint8_t s = 0; s < sectors; s++) {
     const uint8_t block = s * MIFARE_BLOCKS_PER_SECTOR;
     uint8_t keyA[6], keyB[6];
@@ -1190,12 +1278,28 @@ static SweepResult runCardSweep(uint8_t sectors, const uint8_t dict[][6],
 
     for (uint8_t ktIdx = 0; ktIdx < 2; ktIdx++) {
       const uint8_t keyType = (ktIdx == 0) ? MIFARE_KEY_A : MIFARE_KEY_B;
-      *naive += dictCount; // this slot's naive pool = the dictionary
       uint8_t found[6];
       SweepSlotResult res = sweepSlot(block, keyType, known, *knownCount, dict,
                                       dictCount, attempts, found);
       if (res == SLOT_CARD_REMOVED) {
         mifareSweepActive = false;
+        // Publish what the sweep got before it gave up. The cached counters
+        // are what a later `mifare check` answers with, and leaving them
+        // stale (from an earlier sweep, or at zero) made the host report the
+        // partial result of an interrupted sweep as if it were the whole card.
+        mifareSweepCacheAttempts = *attempts;
+        mifareSweepCacheNaive = *naive;
+        mifareSweepCacheRecovered = *recovered;
+        mifareSweepCacheTrailer = 0; // the trailer pass never ran
+        mifareSweepCacheAborted = true;
+        // The wall-clock split of the aborted sweep travels with it: it is
+        // what tells "the card left" from "the re-select gave up" (see
+        // det_timeout / det_ok in `mifare timing`).
+        mifareSweepCacheAuthMs = mifareSweepAuthMs;
+        mifareSweepCacheReselectMs = mifareSweepReselectMs;
+        mifareSweepCacheResetMs = mifareSweepResetMs;
+        mifareSweepCacheDetectMs = mifareSweepDetectMs;
+        mifareSweepCacheTrailerMs = mifareSweepTrailerMs;
         return SWEEP_CARD_REMOVED;
       }
       if (res == SLOT_FOUND) {
@@ -1214,6 +1318,7 @@ static SweepResult runCardSweep(uint8_t sectors, const uint8_t dict[][6],
     sweepCacheStore(s, haveA, keyA, haveB, keyB);
   }
   mifareSweepActive = false;
+  mifareSweepCacheAborted = false;
   // The counters of THIS sweep go with the cached keys, so a later
   // `mifare check` can answer from the cache with the same numbers.
   mifareSweepCacheAttempts = *attempts;
@@ -1399,9 +1504,9 @@ recoverKeyBViaTrailer(uint8_t sector, const uint8_t *keyA, uint8_t outKeyB[6]) {
   if (!mifareReadSector(nfc, sector, MIFARE_KEY_A, keyA, data, &authOk)) {
     mifareCardAuthed = false;
     // A failed read may have HALTed the card: re-select so the next step
-    // starts clean. mifareReselect() returning false means the card is gone,
+    // starts clean. sweepReselect() returning false means the card is gone,
     // not that the key was wrong.
-    if (!timedReselect(nfc)) {
+    if (!sweepReselect(nfc)) {
       beginCardRemovalWait();
       return TRAILER_CARD_REMOVED;
     }
@@ -1751,7 +1856,7 @@ static void emitCachedSectors(uint8_t sectors) {
 //            sectors the sweep cracked are read and emitted before the reply
 //            (Fase 4, tarea 4.4 - the standalone workflow in one round-trip).
 // --settle:  ms of rest between a re-select and the next authentication
-//            (default MIFARE_CHECK_SETTLE_MS = 5). The host-driven sweep gets
+//            (default MIFARE_CHECK_SETTLE_MS = 25). The host-driven sweep gets
 //            this rest for free from its USB round-trip; the on-device sweep
 //            has to ask for it explicitly. Tunable at runtime so it can be
 //            measured on the hardware without reflashing.
@@ -1857,6 +1962,10 @@ void handleMifareCheck(char *args) {
     Serial.print(" trailer=");
     Serial.print(mifareSweepCacheTrailer);
     Serial.print(" cached=1");
+    // 1 when the cached sweep was interrupted before it covered every
+    // sector: the per-sector lines above are then a PARTIAL result.
+    Serial.print(" aborted=");
+    Serial.print(mifareSweepCacheAborted ? 1 : 0);
     Serial.print(" auth_ms=");
     Serial.print(mifareSweepCacheAuthMs);
     Serial.print(" reselect_ms=");
@@ -1928,6 +2037,8 @@ void handleMifareCheck(char *args) {
   Serial.print(" trailer=");
   Serial.print(trailerAuths);
   Serial.print(" cached=0");
+  // A sweep that reaches this point covered every sector.
+  Serial.print(" aborted=0");
   // Where the wall-clock went, measured on the board: the time inside the
   // Crypto-1 authentication, inside the re-select (full reader re-arm +
   // re-detection) and inside the trailer pass. The host-driven sweep issues
@@ -2174,6 +2285,18 @@ void handleMifareTiming(char *args) {
     mifareSweepTrailerMs = 0;
     mifareSweepAttempts = 0;
     mifareSweepReselects = 0;
+    mifareSweepReselectFails = 0;
+    // The core's detection counters too: a measurement starts from a clean
+    // slate, and the det_* counters are half of the measurement.
+    nfc.waitTagCalls = 0;
+    nfc.waitTagOk = 0;
+    nfc.waitTagTimeout = 0;
+    nfc.waitTagNotifications = 0;
+    nfc.waitTagDiscovery = 0;
+    nfc.waitTagSelects = 0;
+    nfc.waitTagDeactivate = 0;
+    nfc.waitTagErrors = 0;
+    nfc.resetFailures = 0;
     replyOk("counters reset");
     return;
   }
@@ -2181,6 +2304,8 @@ void handleMifareTiming(char *args) {
   Serial.print(mifareSweepAttempts);
   Serial.print(" reselects=");
   Serial.print(mifareSweepReselects);
+  Serial.print(" reselect_fails=");
+  Serial.print(mifareSweepReselectFails);
   Serial.print(" auth_ms=");
   Serial.print(mifareSweepAuthMs);
   Serial.print(" reselect_ms=");
@@ -2202,7 +2327,22 @@ void handleMifareTiming(char *args) {
   Serial.print(" det_timeout=");
   Serial.print(nfc.waitTagTimeout);
   Serial.print(" det_ntf=");
-  Serial.println(nfc.waitTagNotifications);
+  Serial.print(nfc.waitTagNotifications);
+  // What the chip actually said when a detection failed: a discovery
+  // notification the host had to answer (det_disc/det_sel), the card
+  // leaving (det_deact), a CORE error (det_err) or the reader re-arm
+  // failing on I²C (rst_fail). Those four separate "the card left" from
+  // "the re-select did not get the card back".
+  Serial.print(" det_disc=");
+  Serial.print(nfc.waitTagDiscovery);
+  Serial.print(" det_sel=");
+  Serial.print(nfc.waitTagSelects);
+  Serial.print(" det_deact=");
+  Serial.print(nfc.waitTagDeactivate);
+  Serial.print(" det_err=");
+  Serial.print(nfc.waitTagErrors);
+  Serial.print(" rst_fail=");
+  Serial.println(nfc.resetFailures);
   replyOk();
 }
 
