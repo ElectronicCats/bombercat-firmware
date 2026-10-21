@@ -54,6 +54,15 @@ public:
   // Returns true when one is detected.
   bool waitForTag(uint16_t timeoutMs = 500);
 
+  // Detection diagnostics (Fase 4, Sesión 11): how many waits, how many
+  // found the card, how many expired and how many unrelated notifications
+  // were drained on the way. They are what tells a "the card left" from a
+  // "the notification was missed" apart, on the hardware.
+  uint32_t waitTagCalls = 0;
+  uint32_t waitTagOk = 0;
+  uint32_t waitTagTimeout = 0;
+  uint32_t waitTagNotifications = 0;
+
   // --- Reader role -------------------------------------------------------
   // Send `cmd` into the RF field and wait for the tag's response frame into
   // `resp` (`respLen` set to the length). Returns false if the first data

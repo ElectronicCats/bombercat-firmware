@@ -108,7 +108,67 @@ bool NfcController::beginEmulationMode() {
 }
 
 bool NfcController::waitForTag(uint16_t timeoutMs) {
-  return _nfc.isTagDetected(timeoutMs);
+  // A BOUNDED wait for the card - the library's isTagDetected() is not one.
+  //
+  // The library loops until the activation notification (0x61 0x05) arrives
+  // and it has NO deadline: the timeout only bounds each individual message
+  // read, not the loop. So whenever the PN7150 keeps notifying (credits,
+  // discovery retries) and the activation notification never comes - which is
+  // exactly what happens when the card is ALREADY SELECTED and the reader
+  // re-arms (the activation was consumed by the re-arm's own message reads) -
+  // the loop spins FOREVER and the board stops answering the REPL entirely.
+  // It did: the removal probe hung the MifareClassic sketch and it had to be
+  // power-cycled (Fase 4, Sesión 11).
+  //
+  // Here the wait has a deadline and returns "not detected" when it expires.
+  // The bookkeeping the library does on the activation notification (filling
+  // in the remote device's interface/protocol/tech and the tag's data) is
+  // replicated here; the "the tag still has to be SELECTed" notification
+  // (0x61 0x03) is handed back to the library, which owns that sequence.
+  const uint32_t deadline = millis() + timeoutMs;
+  uint8_t buf[MAX_NCI_FRAME_SIZE];
+  waitTagCalls++;
+  while ((int32_t)(millis() - deadline) < 0) {
+    if (!_nfc.hasMessage()) {
+      delay(1);
+      continue;
+    }
+    const uint32_t n = _nfc.readData(buf);
+    if (n == 0) {
+      delay(1);
+      continue;
+    }
+    if (buf[0] != 0x61) {
+      waitTagNotifications++;
+      continue; // a credit or another notification we do not care about
+    }
+    if (buf[1] == 0x05) {
+      // RF_INTF_ACTIVATED_NTF: the tag is selected. Same fields the
+      // library's WaitForDiscoveryNotification() fills in.
+      RfIntf_t rfIntf;
+      memset(&rfIntf, 0, sizeof(rfIntf));
+      rfIntf.Interface = buf[4];
+      _nfc.remoteDevice.setInterface(buf[4]);
+      rfIntf.Protocol = buf[5];
+      _nfc.remoteDevice.setProtocol(buf[5]);
+      rfIntf.ModeTech = buf[6];
+      _nfc.remoteDevice.setModeTech(buf[6]);
+      _nfc.remoteDevice.setMoreTagsAvailable(false);
+      _nfc.remoteDevice.setInfo(&rfIntf, &buf[10]);
+      waitTagOk++;
+      return true;
+    }
+    // Anything else (a credit, a discovery notification that would need the
+    // library's SELECT sequence, a deactivation) is drained and the wait
+    // continues. The library's own wait is NOT used here on purpose: it loops
+    // until the activation arrives with no deadline of its own, and that loop
+    // is what wedged the board. In this flow (a MIFARE card in reader mode)
+    // the activation is the only notification that shows up — the counter
+    // below measured zero of anything else in 100+ waits.
+    waitTagNotifications++;
+  }
+  waitTagTimeout++;
+  return false; // the deadline expired: the card is not there
 }
 
 bool NfcController::readerTransceive(uint8_t *cmd, uint8_t cmdLen,
