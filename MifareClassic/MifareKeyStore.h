@@ -37,6 +37,11 @@ static const uint8_t MIFARE_KEYSTORE_VERSION = 1;
 static const uint8_t MIFARE_KEYSTORE_FLAG_AUTOSTORE = 0x01; // auto-persist
                                                             // recovered custom
                                                             // keys
+// Standalone mode: on detection the firmware runs the whole field workflow by
+// itself - sweep, dump the cracked sectors, emit everything over serial - with
+// no PC attached (Fase 4, tarea 4.4). The flag lives in the same record
+// because that record is the device's persisted MIFARE settings.
+static const uint8_t MIFARE_KEYSTORE_FLAG_STANDALONE = 0x02;
 
 // The persisted record. POD, fixed size: it is written to flash verbatim.
 struct MifareKeyStore {

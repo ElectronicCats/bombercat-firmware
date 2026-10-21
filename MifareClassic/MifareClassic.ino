@@ -53,6 +53,8 @@
 #include <NfcController.h>
 #include <TagReader.h>
 
+#include "MifareAccessBits.h"
+#include "MifareBlock0.h"
 #include "MifareClassic.h"
 #include "MifareCommands.h"
 #include "MifareKeyStore.h"
@@ -159,6 +161,41 @@ static const uint8_t MIFARE_CHECK_KNOWN_MAX = 96; // confirmed-key pool cap
 // pin (attempts <= 66 on card_1k) is unaffected.
 static const uint8_t MIFARE_CHECK_SETTLE_MS = 5;
 
+// Runtime override of the settle pause (`mifare check --settle <ms>`), so the
+// value can be tuned ON THE HARDWARE without reflashing - the settle is the
+// knob that decides how much rest the PN7150 gets between a re-select and the
+// next authentication, and that rest is what the host-driven sweep gets for
+// free from its USB round-trip.
+static uint16_t mifareCheckSettleMs = MIFARE_CHECK_SETTLE_MS;
+
+// Where the sweep's wall-clock time goes (Fase 4, Sesión 11). The host-driven
+// sweep and the on-device sweep issue the SAME number of authentications and
+// re-selects, so the time split is what tells them apart: `authMs` is the
+// time inside the Crypto-1 authentication and `reselectMs` the time inside the
+// re-select (a full reader re-arm + re-detection). Reported in the
+// :mifare_check_stat line, so the numbers come from the board and not from a
+// stopwatch on the host.
+//
+// The re-select is split in two, because they have different fixes:
+//   resetMs  — the reader re-arm itself (NCI re-init over I²C);
+//   detectMs — waiting for the card to be detected and selected again.
+static uint32_t mifareSweepAuthMs = 0;
+static uint32_t mifareSweepReselectMs = 0;
+static uint32_t mifareSweepResetMs = 0;
+static uint32_t mifareSweepDetectMs = 0;
+static uint32_t mifareSweepTrailerMs = 0;
+static uint32_t mifareSweepAttempts = 0;
+static uint32_t mifareSweepReselects = 0;
+
+// Outcome of one trailer read (Fase 4, tarea 4.4). Declared here, with the
+// other types, because the Arduino auto-generated prototypes come before the
+// section that defines it and would otherwise name an unknown type.
+enum TrailerReadResult {
+  TRAILER_OK,          // Key B came back
+  TRAILER_FAILED,      // protected by the access bits, or the read failed
+  TRAILER_CARD_REMOVED // the card left the field
+};
+
 // Per-slot sweep outcome (declared here, above the Arduino auto-generated
 // prototypes, so the functions returning it name a known type).
 enum SweepSlotResult { SLOT_FOUND, SLOT_NOT_FOUND, SLOT_CARD_REMOVED };
@@ -212,8 +249,80 @@ static bool mifareCardAuthed = false;
 static bool awaitingRemoval = false;
 static uint32_t nextRemovalProbeAt = 0;
 static const uint32_t MIFARE_REMOVAL_PROBE_INTERVAL_MS = 500; // vendor cadence
-static const uint16_t MIFARE_REMOVAL_PROBE_TIMEOUT_MS =
-    200; // bounded reselect wait
+// The window the removal probe gives the card to be found again. It has to
+// outlast the re-detection the reselect costs on this hardware (~80 ms
+// measured, but it is a full reader re-arm plus the card waking up from its
+// HALT state, so it can take longer — and a window that expires too early
+// makes the firmware believe the card left when it is right there).
+static const uint16_t MIFARE_REMOVAL_PROBE_TIMEOUT_MS = 1500;
+// How many consecutive failed probes it takes to believe the card left.
+//
+// ONE failed probe is NOT proof: the re-arm can fail for reasons that have
+// nothing to do with the card (a stale notification still queued in the
+// PN7150, an I2C hiccup, a reset that did not settle). Believing it made the
+// firmware re-arm discovery, re-detect the SAME card, and run the whole
+// on-detection auto-probe AGAIN — a loop that left the board busy ~40 % of the
+// time and burned 7.5 s of RF work per cycle (Fase 4, Sesión 11).
+static const uint8_t MIFARE_REMOVAL_MISSES_TO_CONFIRM = 3;
+static uint8_t mifareRemovalMisses = 0;
+
+// True while a dictionary sweep is running (the auto-probe on detection, or
+// an explicit `mifare check`). The sweep blocks loop(), so the control REPL
+// is silent for its whole duration (11 s measured on a 1K card, minutes on a
+// card whose sectors nothing opens). `info` reports this so the host can tell
+// "the board is working on it" from "the board is gone" instead of guessing —
+// and, above all, so it never mistakes a busy board for a different firmware.
+static bool mifareSweepActive = false;
+
+// Keys recovered by the last sweep, cached in RAM (Fase 4, tarea 4.4).
+//
+// The dump step needs the keys the sweep found, and the standalone workflow
+// runs "detect -> sweep -> dump" without a PC in between: caching them is
+// what lets `mifare dump` (and the automatic dump) reuse the sweep's work
+// instead of sweeping the card a second time.
+//
+// Index 0 = Key A, index 1 = Key B. `mifareSweepHave[sector]` is a bitmask:
+// bit 0 = Key A recovered, bit 1 = Key B recovered.
+static uint8_t mifareSweepKeys[MIFARE_CHECK_MAX_SECTORS][2][6];
+static uint8_t mifareSweepHave[MIFARE_CHECK_MAX_SECTORS];
+static uint8_t mifareSweepSectors = 0;
+static bool mifareSweepValid = false;
+
+// The counters of the sweep whose results are cached above, so a later
+// `mifare check` can answer from the cache with the SAME numbers the sweep
+// reported (Fase 4, Sesión 11: the device must not sweep the same card twice
+// — the on-detection auto-probe already did the full sweep, and repeating it
+// costs exactly the same authentications for exactly the same result).
+static uint32_t mifareSweepCacheAttempts = 0;
+static uint32_t mifareSweepCacheNaive = 0;
+static uint8_t mifareSweepCacheRecovered = 0;
+static uint8_t mifareSweepCacheTrailer = 0;
+// The wall-clock split OF THAT SWEEP, cached with it: the global counters keep
+// accumulating whatever else the board did afterwards (a host-driven sweep
+// adds its own authentications to them), so a cached answer has to report the
+// numbers of the sweep it is reusing, not the sum of everything.
+static uint32_t mifareSweepCacheAuthMs = 0;
+static uint32_t mifareSweepCacheReselectMs = 0;
+static uint32_t mifareSweepCacheResetMs = 0;
+static uint32_t mifareSweepCacheDetectMs = 0;
+static uint32_t mifareSweepCacheTrailerMs = 0;
+
+// True while the firmware is running the standalone chain (detect -> sweep ->
+// dump -> emit) on its own. The chain cedes control to the control REPL
+// between its steps, so a command could arrive mid-chain; the chain refuses
+// it instead of letting it touch the card session (re-entrancy).
+static bool mifareChainActive = false;
+
+// UID the anti-collision loop reported for the card in the field. Kept so the
+// dump step can cross-check it against the UID stored in block 0 - they differ
+// on a clone/magic card, and that difference is worth saying out loud.
+static String mifareCardUid;
+
+// UID of the last card that was swept. When the SAME card comes back (the
+// removal probe can miss it, or the user taps it again), its keys are already
+// known: re-running the auto-probe would cost the same authentications for
+// the same result (Fase 4, Sesión 11).
+static String mifareLastCardUid;
 
 // Function prototypes.
 // hexCompact()/protocolName()/TagReader::emitTagEvent(Serial, ) now come from
@@ -234,8 +343,20 @@ void handleMifareRead(char *args);
 void handleMifareWrite(char *args);
 void handleMifareSector(char *args);
 void handleMifareCheck(char *args);
+void handleMifareDump(char *args);
 void handleMifareKeys(char *args);
+void handleMifareStandalone(char *args);
+void handleMifareTiming(char *args);
 void emitKnownKeys();
+// Fase 4 (tarea 4.4): the trailer-read pass and the sector dump, used by both
+// the auto-probe and `mifare check` (declared here because the Arduino
+// auto-generated prototypes come before the section that defines them).
+static uint8_t trailerReadPass(uint8_t sectors, SweepSectorSink sink, void *ctx,
+                               uint32_t *trailerAuths, uint8_t *recovered,
+                               bool *removed);
+static void runStandaloneChain();
+static TrailerReadResult
+recoverKeyBViaTrailer(uint8_t sector, const uint8_t *keyA, uint8_t outKeyB[6]);
 
 void setup() {
   Serial.begin(115200);
@@ -287,8 +408,23 @@ void loop() {
 
   if (mifareSessionOpen) {
     if ((int32_t)(millis() - mifareSessionDeadline) >= 0) {
-      Serial.println("Mifare session idle timeout.");
-      beginCardRemovalWait();
+      // The session has been idle for a while. Before giving it up, check
+      // whether the card is STILL THERE: if it is, the session is perfectly
+      // usable and it simply keeps running. A forgotten card must not make the
+      // board unusable — the user can still read and write it, and lifting it
+      // releases the reader for the next card.
+      //
+      // Closing the session anyway (the old behaviour) left the board
+      // answering "no card selected" to every command while the card was
+      // right there, until the user lifted it: the host's sweep then failed
+      // every single authentication (Fase 4, Sesión 11).
+      if (mifareCardStillPresent()) {
+        mifareSessionDeadline = millis() + MIFARE_SESSION_IDLE_MS;
+        mifareCardAuthed = false; // the re-arm dropped the Crypto1 session
+      } else {
+        Serial.println("Mifare session idle timeout.");
+        beginCardRemovalWait();
+      }
     }
     return; // card stays selected; don't re-arm discovery mid-session
   }
@@ -312,6 +448,36 @@ void handleTagDetected() {
     Serial.println(" - Found MIFARE card");
     String uidHex = TagReader::hexCompact(nfc.raw().remoteDevice.getNFCID(),
                                           nfc.raw().remoteDevice.getNFCIDLen());
+    // Remembered so the dump step can cross-check it against the UID stored
+    // in block 0 - they differ on a clone/magic card.
+    mifareCardUid = uidHex;
+
+    // The SAME card is back (it never really left, or the user tapped it
+    // again): its keys are already known, so the auto-probe must NOT run
+    // again - the same sweep would cost the same authentications for the same
+    // result (Fase 4, Sesión 11). Re-open the session and say so.
+    if (uidHex == mifareLastCardUid && mifareSweepValid) {
+      Serial.println(" - Same card again: reusing the keys already recovered");
+      mifareLastCardUid = uidHex;
+      AutoProbeCtx cached;
+      cached.probeSector = MIFARE_PROBE_BLOCK / MIFARE_BLOCKS_PER_SECTOR;
+      cached.haveKeyA = false;
+      bool haveA, haveB;
+      const uint8_t *keyA, *keyB;
+      sweepCacheGet(cached.probeSector, &haveA, &keyA, &haveB, &keyB);
+      if (haveA) {
+        cached.haveKeyA = true;
+        memcpy(cached.keyA, keyA, 6);
+      }
+      emitMifareSessionSignal(tsMs, uidHex, cached);
+      if (mifareKeys.flags & MIFARE_KEYSTORE_FLAG_STANDALONE) {
+        runStandaloneChain();
+      }
+      openMifareSession();
+      return;
+    }
+    mifareLastCardUid = uidHex;
+
     Serial.print("\tUID = ");
     Serial.println(uidHex);
     TagReader::emitTagEvent(Serial, tsMs, "NFC-A", protocolName, uidHex);
@@ -354,6 +520,17 @@ void beginCardRemovalWait() {
   mifareSessionOpen = false; // no REPL commands while waiting for removal
 }
 
+// Is the card still in the field? A bounded probe: re-arm the reader and wait
+// for the card to be found again. Unlike the removal probe, a failed
+// detection here concludes NOTHING: it only means "not found right now", so
+// the caller decides what to do about it.
+static bool mifareCardStillPresent() {
+  if (!nfc.reset()) {
+    return false;
+  }
+  return nfc.waitForTag(MIFARE_REMOVAL_PROBE_TIMEOUT_MS);
+}
+
 // One bounded removal probe, called from loop() at
 // MIFARE_REMOVAL_PROBE_INTERVAL_MS - never blocks longer than
 // MIFARE_REMOVAL_PROBE_TIMEOUT_MS, so control.poll() keeps running between
@@ -366,18 +543,46 @@ void beginCardRemovalWait() {
 // discovery is already freshly re-armed from that last reset().
 void pollCardRemoval() {
   nextRemovalProbeAt = millis() + MIFARE_REMOVAL_PROBE_INTERVAL_MS;
-  if (nfc.reset() && nfc.waitForTag(MIFARE_REMOVAL_PROBE_TIMEOUT_MS)) {
-    return; // still present - try again next interval
+  const bool present =
+      nfc.reset() && nfc.waitForTag(MIFARE_REMOVAL_PROBE_TIMEOUT_MS);
+  if (present) {
+    mifareRemovalMisses = 0; // the card is still there
+    return;                  // still present - try again next interval
   }
+  // One failed probe is not proof that the card left (see
+  // MIFARE_REMOVAL_MISSES_TO_CONFIRM): only several consecutive misses are.
+  if (++mifareRemovalMisses < MIFARE_REMOVAL_MISSES_TO_CONFIRM) {
+    return;
+  }
+  mifareRemovalMisses = 0;
   Serial.println("Card removed!");
   Serial.println("Waiting for a Mifare Classic card...");
   awaitingRemoval = false;
   tagSessionActive = false;
+  mifareCardUid = "";       // the next card has its own UID
+  mifareLastCardUid = "";   // ... and it is not the one that just left
+  sweepCacheInvalidate();   // the cached keys belong to the card that left
   mifareCardAuthed = false; // next card starts from a clean, un-authed session
 }
 
 // Control-plane state reported by `info`.
+//
+// The host reads this to tell apart the states that need DIFFERENT advice
+// from the user:
+//   "scanning"          — no card; tap one.
+//   "tag-detected"      — a session is open; REPL commands work.
+//   "sweeping"          — a dictionary sweep is running; the REPL is busy
+//                         until it finishes (wait, do not re-flash).
+//   "awaiting-removal"  — the board is waiting for the card to LEAVE the
+//                         field before it re-arms discovery. Tapping does
+//                         nothing here: the card must go away for a moment.
 const char *controlState() {
+  if (mifareSweepActive) {
+    return "sweeping";
+  }
+  if (awaitingRemoval) {
+    return "awaiting-removal";
+  }
   return tagSessionActive ? "tag-detected" : "scanning";
 }
 
@@ -513,12 +718,39 @@ static void replyKv(const char *key, const String &value) {
 bool mifareBeginAuth() {
   if (mifareCardAuthed) {
     mifareCardAuthed = false;
-    if (!mifareReselect(nfc)) {
+    if (!timedReselect(nfc)) {
       beginCardRemovalWait(); // card left the field while the session was open
       return false;
     }
   }
   return true;
+}
+
+// The re-select, with the wall-clock split (Fase 4, Sesión 11).
+//
+// Same choreography as mifareReselect() — a full reader re-arm (the only
+// re-selection proven on this hardware, see MifareCommands.cpp) followed by
+// the wait for the card to be detected again — but MEASURED, because it is
+// the dominant cost of a dictionary sweep (a wrong key HALTs the card, and
+// every wrong key costs one re-select).
+//
+// The two halves are timed apart because they have different fixes: the
+// re-arm is I²C/NCI work the firmware does, while the detection wait is the
+// card waking up from its HALT state and the reader finding it again.
+static bool timedReselect(NfcController &nfc) {
+  mifareSweepReselects++;
+  const uint32_t t0 = millis();
+  const bool armed = nfc.reset();
+  const uint32_t t1 = millis();
+  mifareSweepResetMs += t1 - t0;
+  if (!armed) {
+    mifareSweepReselectMs += millis() - t0;
+    return false;
+  }
+  const bool detected = nfc.waitForTag();
+  mifareSweepDetectMs += millis() - t1;
+  mifareSweepReselectMs += millis() - t0;
+  return detected;
 }
 
 // `mifare auth <block> <A|B> <key_hex12>` -> +OK / -ERR
@@ -541,7 +773,14 @@ void handleMifareAuth(char *args) {
     replyErr("card removed, tap a card again");
     return;
   }
-  if (mifareAuthenticate(nfc, blockNum, keyType, key)) {
+  // Timed like the on-device sweep (Fase 4, Sesión 11): the host-driven sweep
+  // and the on-device one must be comparable with the SAME counters, or the
+  // difference between them stays a guess.
+  const uint32_t t0 = millis();
+  const bool authOk = mifareAuthenticate(nfc, blockNum, keyType, key);
+  mifareSweepAuthMs += millis() - t0;
+  mifareSweepAttempts++;
+  if (authOk) {
     mifareCardAuthed = true; // session now open; tear down before the next auth
     replyOk();
   } else {
@@ -554,7 +793,7 @@ void handleMifareAuth(char *args) {
     // wrong-key from a removed card: end the session and re-arm in that case so
     // the host's next command correctly gets "no card selected" instead of a
     // misleading auth failure. See CLI_IMPROVEMENTS_MifareCheck.md §4.
-    if (!mifareReselect(nfc)) {
+    if (!timedReselect(nfc)) {
       beginCardRemovalWait();
       replyErr("card removed, tap a card again");
       return;
@@ -787,19 +1026,23 @@ static bool sweepAuth(uint8_t block, uint8_t keyType, const uint8_t *key,
   *removed = false;
   if (mifareCardAuthed) {
     mifareCardAuthed = false;
-    if (!mifareReselect(nfc)) {
+    if (!timedReselect(nfc)) {
       *removed = true;
       return false;
     }
-    delay(MIFARE_CHECK_SETTLE_MS); // let the PN7150 settle before the auth
+    delay(mifareCheckSettleMs); // let the PN7150 settle before the auth
   }
   (*attempts)++;
-  if (mifareAuthenticate(nfc, block, keyType, key)) {
+  const uint32_t t0 = millis();
+  const bool ok = mifareAuthenticate(nfc, block, keyType, key);
+  mifareSweepAuthMs += millis() - t0;
+  mifareSweepAttempts++;
+  if (ok) {
     mifareCardAuthed = true; // leave warm; next sweepAuth tears it down
     return true;
   }
-  if (mifareReselect(nfc)) { // recover the HALTed card before the next key
-    delay(MIFARE_CHECK_SETTLE_MS); // same rest the USB-paced host path gets
+  if (timedReselect(nfc)) {     // recover the HALTed card before the next key
+    delay(mifareCheckSettleMs); // same rest the USB-paced host path gets
   } else {
     *removed = true;
   }
@@ -856,6 +1099,63 @@ static void emitCheckSector(uint8_t sector, bool haveA, const uint8_t *keyA,
   Serial.flush(); // push the line over USB now; also services the USB stack
 }
 
+// --- sweep result cache (Fase 4, tarea 4.4) ----------------------------------
+//
+// The sweep's recovered keys are kept in RAM so the dump step can reuse them
+// without sweeping the card a second time. `mifare dump` (and the automatic
+// standalone dump) read the card with these keys; the host's `mifare dump`
+// gets the same result in ONE round-trip instead of one per sector.
+
+static void sweepCacheReset(uint8_t sectors) {
+  memset(mifareSweepHave, 0, sizeof(mifareSweepHave));
+  mifareSweepSectors = sectors;
+  mifareSweepValid = true; // there IS sweep data for the card in the field
+}
+
+// Store one sector's recovered keys (either half may be absent).
+static void sweepCacheStore(uint8_t sector, bool haveA, const uint8_t *keyA,
+                            bool haveB, const uint8_t *keyB) {
+  if (sector >= MIFARE_CHECK_MAX_SECTORS) {
+    return;
+  }
+  uint8_t mask = 0;
+  if (haveA) {
+    memcpy(mifareSweepKeys[sector][0], keyA, 6);
+    mask |= 0x01;
+  }
+  if (haveB) {
+    memcpy(mifareSweepKeys[sector][1], keyB, 6);
+    mask |= 0x02;
+  }
+  mifareSweepHave[sector] = mask;
+}
+
+// The cached keys of one sector: `haveA`/`haveB` say which half is real.
+static void sweepCacheGet(uint8_t sector, bool *haveA, const uint8_t **keyA,
+                          bool *haveB, const uint8_t **keyB) {
+  if (sector >= MIFARE_CHECK_MAX_SECTORS) {
+    *haveA = false;
+    *haveB = false;
+    *keyA = nullptr;
+    *keyB = nullptr;
+    return;
+  }
+  const uint8_t mask = mifareSweepHave[sector];
+  *haveA = (mask & 0x01) != 0;
+  *haveB = (mask & 0x02) != 0;
+  *keyA = mifareSweepKeys[sector][0];
+  *keyB = mifareSweepKeys[sector][1];
+}
+
+// Drop the cached sweep. Called when the card leaves the field (the next
+// card is a different one) and when the key-store changes (the dictionary the
+// sweep used is no longer the one the store would use now).
+static void sweepCacheInvalidate() {
+  mifareSweepValid = false;
+  mifareSweepSectors = 0;
+  memset(mifareSweepHave, 0, sizeof(mifareSweepHave));
+}
+
 // Shared sector x {A,B} dictionary sweep, factored out of `mifare check` so the
 // Fase 2 on-detection auto-probe runs the exact same logic instead of the old
 // degenerate block-4 / Key-A / 3-key probe (Tarea 2.4: reuse, don't duplicate).
@@ -874,6 +1174,15 @@ static SweepResult runCardSweep(uint8_t sectors, const uint8_t dict[][6],
                                 uint8_t *knownCount, SweepSectorSink sink,
                                 void *ctx, uint32_t *attempts, uint32_t *naive,
                                 uint8_t *recovered) {
+  mifareSweepActive = true; // `info` says "sweeping" while this runs
+  sweepCacheReset(sectors); // the dump step reads the keys from here
+  mifareSweepAuthMs = 0;    // the wall-clock split of this sweep
+  mifareSweepReselectMs = 0;
+  mifareSweepResetMs = 0;
+  mifareSweepDetectMs = 0;
+  mifareSweepTrailerMs = 0;
+  mifareSweepAttempts = 0;
+  mifareSweepReselects = 0;
   for (uint8_t s = 0; s < sectors; s++) {
     const uint8_t block = s * MIFARE_BLOCKS_PER_SECTOR;
     uint8_t keyA[6], keyB[6];
@@ -886,6 +1195,7 @@ static SweepResult runCardSweep(uint8_t sectors, const uint8_t dict[][6],
       SweepSlotResult res = sweepSlot(block, keyType, known, *knownCount, dict,
                                       dictCount, attempts, found);
       if (res == SLOT_CARD_REMOVED) {
+        mifareSweepActive = false;
         return SWEEP_CARD_REMOVED;
       }
       if (res == SLOT_FOUND) {
@@ -901,7 +1211,13 @@ static SweepResult runCardSweep(uint8_t sectors, const uint8_t dict[][6],
       }
     }
     sink(s, haveA, keyA, haveB, keyB, ctx);
+    sweepCacheStore(s, haveA, keyA, haveB, keyB);
   }
+  mifareSweepActive = false;
+  // The counters of THIS sweep go with the cached keys, so a later
+  // `mifare check` can answer from the cache with the same numbers.
+  mifareSweepCacheAttempts = *attempts;
+  mifareSweepCacheNaive = *naive;
   return SWEEP_DONE;
 }
 
@@ -1004,10 +1320,29 @@ void probeMifareBlock(uint32_t tsMs, const String &uidHex) {
     return;
   }
 
+  // Second pass: read Key B off the card's trailer for the sectors the
+  // dictionary opened with Key A only - the same pass the host runs
+  // (check.py's _trailer_read_pass), so both sides recover the same keys.
+  uint32_t trailerAuths = 0;
+  bool cardRemoved = false;
+  trailerReadPass(MIFARE_CHECK_DEFAULT_SECTORS, autoProbeSectorSink, &ctx,
+                  &trailerAuths, &recovered, &cardRemoved);
+  if (cardRemoved) {
+    emitMifareEvent(tsMs, uidHex, MIFARE_PROBE_BLOCK, nullptr, 0, "auth_fail");
+    return;
+  }
+
   // The session-open signal goes out FIRST: the host is blocked waiting for
   // it, and the (optional) key-store flash write below can take a few
   // hundred ms with the CPU busy.
   emitMifareSessionSignal(tsMs, uidHex, ctx);
+
+  // Standalone mode (Fase 4, tarea 4.4): with no PC attached, the firmware
+  // finishes the job by itself - dump the sectors the sweep cracked and emit
+  // them over serial. The flag persists with the key-store.
+  if (mifareKeys.flags & MIFARE_KEYSTORE_FLAG_STANDALONE) {
+    runStandaloneChain();
+  }
 
   // Persist any custom key the sweep just confirmed (opt-in; at most one
   // flash write per sweep). After the signal on purpose: the write must not
@@ -1016,19 +1351,423 @@ void probeMifareBlock(uint32_t tsMs, const String &uidHex) {
                          knownCount);
 }
 
-// `mifare check [--sectors <n>] [--keys <hex,...>]`
+// --- Fase 4 (tarea 4.4): trailer-read Key B, sector dump, standalone ---------
+//
+// The workflow the host drives today, command by command, moves into the
+// firmware: sweep -> read the sectors it cracked -> emit. The two pieces of
+// "decryption" logic the host used to own are ported here, so both sides
+// reach the SAME verdict on the same card:
+//
+//   * the access-bits decode (MifareAccessBits, a port of the host's
+//     access_bits.py) - it decides whether Key B can be read back;
+//   * the trailer read that recovers Key B without any Crypto-1 attack
+//     (the twin of check.py's _recover_key_b_via_trailer).
+//
+// The parity is checked by a native test that compiles these modules and
+// compares them with the Python ones (bombercat-tools/tests/
+// test_mifare_parity.py) - not just asserted in a comment.
+
+// Outcome of one trailer read.
+//
+// (TrailerReadResult is declared with the other types near the top of the
+// file, because the Arduino auto-generated prototypes come before this
+// section and would otherwise name an unknown type.)
+
+// Recover Key B straight off the card's trailer, using the Key A we already
+// have.
+//
+// This is NOT the Crypto-1 nested attack: that needs raw nonce/parity capture
+// the PN7150 never surfaces (it runs Crypto-1 in-chip and only reports auth
+// pass/fail). The trailer is simply READ with Key A, and only cards whose
+// access bits leave Key B *readable with Key A* (the transport/default
+// configs) give it back in cleartext. Key A itself never reads back under any
+// access condition, so only Key B is recoverable this way.
+//
+// The rules are the host's, rule for rule (check.py's
+// _recover_key_b_via_trailer): Key B is only accepted when the trailer's
+// access bits say "Key A" - not "Key A or B" - and an all-zero Key B is
+// refused as "not recovered" instead of being reported as a key.
+static TrailerReadResult
+recoverKeyBViaTrailer(uint8_t sector, const uint8_t *keyA, uint8_t outKeyB[6]) {
+  uint8_t data[MIFARE_BLOCKS_PER_SECTOR * MIFARE_BLOCK_SIZE];
+  bool authOk = false;
+  // Independent auth: tear down any warm Crypto-1 session first, exactly
+  // like every other authentication path (see mifareCardAuthed).
+  if (!mifareBeginAuth()) {
+    return TRAILER_CARD_REMOVED;
+  }
+  if (!mifareReadSector(nfc, sector, MIFARE_KEY_A, keyA, data, &authOk)) {
+    mifareCardAuthed = false;
+    // A failed read may have HALTed the card: re-select so the next step
+    // starts clean. mifareReselect() returning false means the card is gone,
+    // not that the key was wrong.
+    if (!timedReselect(nfc)) {
+      beginCardRemovalWait();
+      return TRAILER_CARD_REMOVED;
+    }
+    return TRAILER_FAILED;
+  }
+  mifareCardAuthed = true; // warm session; the next auth tears it down
+
+  // Trailer layout: key A (0-5) | access conditions + GPB (6-9) | key B
+  // (10-15).
+  const uint8_t *trailer =
+      data + (MIFARE_BLOCKS_PER_SECTOR - 1) * MIFARE_BLOCK_SIZE;
+  MifareAccessBits access;
+  mifareParseAccessBits(trailer + 6, access);
+  if (access.trailer.keyBRead != MIFARE_PERM_KEY_A) {
+    return TRAILER_FAILED; // Key B is protected by the access bits
+  }
+  memcpy(outKeyB, trailer + 10, 6);
+  bool allZero = true;
+  for (uint8_t i = 0; i < 6; i++) {
+    if (outKeyB[i] != 0) {
+      allZero = false;
+      break;
+    }
+  }
+  if (allZero) {
+    return TRAILER_FAILED; // the card returned zeros for Key B
+  }
+  return TRAILER_OK;
+}
+
+// Second pass of a sweep: every sector the dictionary opened with Key A but
+// NOT with Key B gets one more try - read the trailer with the Key A we have
+// and take Key B off it.
+//
+// The host does exactly this (check.py's _trailer_read_pass), so both sides
+// recover the same keys from the same card. It runs AFTER the whole sweep,
+// exactly like the host, so a Key B recovered this way does NOT enter the
+// sweep's known-key pool: the number of authentications stays comparable
+// between the host-driven and the on-device sweep.
+//
+// `sink` re-emits the sector's line with the Key B filled in. The host keeps
+// the LAST line per sector, so the updated key wins.
+static uint8_t trailerReadPass(uint8_t sectors, SweepSectorSink sink, void *ctx,
+                               uint32_t *trailerAuths, uint8_t *recovered,
+                               bool *removed) {
+  uint8_t found = 0;
+  *removed = false;
+  for (uint8_t s = 0; s < sectors; s++) {
+    bool haveA, haveB;
+    const uint8_t *keyA, *keyB;
+    sweepCacheGet(s, &haveA, &keyA, &haveB, &keyB);
+    if (!haveA || haveB) {
+      continue; // nothing to read the trailer with, or Key B is already known
+    }
+    (*trailerAuths)++;
+    uint8_t keyBRead[6];
+    const uint32_t t0 = millis();
+    TrailerReadResult res = recoverKeyBViaTrailer(s, keyA, keyBRead);
+    mifareSweepTrailerMs += millis() - t0;
+    if (res == TRAILER_CARD_REMOVED) {
+      *removed = true;
+      return found;
+    }
+    if (res != TRAILER_OK) {
+      continue; // protected by the access bits, or the read failed
+    }
+    sweepCacheStore(s, true, keyA, true, keyBRead);
+    (*recovered)++;
+    found++;
+    if (sink != nullptr) {
+      sink(s, true, keyA, true, keyBRead, ctx);
+    }
+  }
+  // The cached sweep's counters follow the pass (the recovered keys it added
+  // are part of the result).
+  mifareSweepCacheRecovered = *recovered;
+  mifareSweepCacheTrailer =
+      (uint8_t)(*trailerAuths > 255 ? 255 : *trailerAuths);
+  mifareSweepCacheAuthMs = mifareSweepAuthMs;
+  mifareSweepCacheReselectMs = mifareSweepReselectMs;
+  mifareSweepCacheResetMs = mifareSweepResetMs;
+  mifareSweepCacheDetectMs = mifareSweepDetectMs;
+  mifareSweepCacheTrailerMs = mifareSweepTrailerMs;
+  return found;
+}
+
+// Emit one dumped sector: the 4 blocks as 128 hex chars (or "-" for a hole)
+// and the key type that opened it ("A"/"B", "-" for a hole). A sector that
+// could not be read carries the reason as a third token ("nokey", "readfail",
+// "removed") - the host turns it into the `failed_sectors` entry.
+static void emitDumpSector(uint8_t sector, const uint8_t *data,
+                           const char *keyType, const char *reason) {
+  Serial.print(":mifare_dump_s");
+  Serial.print(sector);
+  Serial.print(' ');
+  Serial.print(data != nullptr
+                   ? TagReader::hexCompact(data, MIFARE_BLOCKS_PER_SECTOR *
+                                                     MIFARE_BLOCK_SIZE)
+                   : String("-"));
+  Serial.print(' ');
+  Serial.print(keyType);
+  if (reason != nullptr) {
+    Serial.print(' ');
+    Serial.print(reason);
+  }
+  Serial.println();
+  Serial.flush(); // push the line over USB now; also services the USB stack
+}
+
+// The block 0 the card returned, dissected with the SAME rules as the host's
+// block0.py (the firmware's MifareBlock0 is a port of it). Emitted raw AND
+// dissected: a host that has block0.py re-parses the raw bytes and gets the
+// identical verdict, and one that doesn't can still read the fields.
+//
+// The UID stored in block 0 is cross-checked against the anti-collision UID:
+// they differ on a clone/magic card, and that difference is worth saying out
+// loud instead of hiding it in a hex dump.
+static void emitCard0(const uint8_t *sector0) {
+  MifareBlock0 b0;
+  mifareParseBlock0(sector0, b0);
+  Serial.print(":mifare_card0 ");
+  Serial.print(TagReader::hexCompact(sector0, MIFARE_BLOCK_SIZE));
+  Serial.print(" uid=");
+  Serial.print(TagReader::hexCompact(b0.uid, 4));
+  Serial.print(" sak=");
+  Serial.print(TagReader::hexCompact(&b0.sak, 1));
+  Serial.print(" atqa=");
+  Serial.print(TagReader::hexCompact(b0.atqa, 2));
+  Serial.print(" bcc=");
+  Serial.print(TagReader::hexCompact(&b0.bcc, 1));
+  Serial.print(" bcc_ok=");
+  Serial.print(b0.bccValid ? 1 : 0);
+  Serial.println();
+  Serial.flush();
+
+  const String uidHex = TagReader::hexCompact(b0.uid, 4);
+  if (mifareCardUid.length() > 0 && mifareCardUid != uidHex) {
+    Serial.println("WARNING: the UID in block 0 differs from the tag UID "
+                   "(clone/magic card?)");
+  }
+}
+
+// Read every sector the sweep cracked and emit it.
+//
+// The keys come from the sweep cache, so the card is read ONCE: no second
+// sweep, no per-sector host round-trip. A sector with no recovered key is an
+// honest hole ("nokey"), never a guess.
+static SweepResult runSectorDump(uint8_t sectors, uint8_t *read,
+                                 uint8_t *failed) {
+  for (uint8_t s = 0; s < sectors; s++) {
+    bool haveA, haveB;
+    const uint8_t *keyA, *keyB;
+    sweepCacheGet(s, &haveA, &keyA, &haveB, &keyB);
+    if (!haveA && !haveB) {
+      emitDumpSector(s, nullptr, "-", "nokey");
+      (*failed)++;
+      continue;
+    }
+    const bool useA = haveA;
+    const uint8_t keyType = useA ? MIFARE_KEY_A : MIFARE_KEY_B;
+    const uint8_t *key = useA ? keyA : keyB;
+
+    // Independent auth: never ride a warm session from a previous sector.
+    if (!mifareBeginAuth()) {
+      emitDumpSector(s, nullptr, "-", "removed");
+      (*failed)++;
+      return SWEEP_CARD_REMOVED;
+    }
+    uint8_t data[MIFARE_BLOCKS_PER_SECTOR * MIFARE_BLOCK_SIZE];
+    bool authOk = false;
+    if (!mifareReadSector(nfc, s, keyType, key, data, &authOk)) {
+      mifareCardAuthed = false;
+      if (!mifareReselect(nfc)) {
+        beginCardRemovalWait();
+        emitDumpSector(s, nullptr, "-", "removed");
+        (*failed)++;
+        return SWEEP_CARD_REMOVED;
+      }
+      emitDumpSector(s, nullptr, "-", "readfail");
+      (*failed)++;
+      continue;
+    }
+    mifareCardAuthed = true; // warm session; the next auth tears it down
+
+    // Substitute the recovered keys into the trailer: a card never reads Key
+    // A back (and often not Key B either), so the raw bytes would show zeros
+    // where the real keys are. Same substitution the host's dump does
+    // (display.py's _substitute_trailer_keys), so both dumps are identical.
+    uint8_t *trailer =
+        data + (MIFARE_BLOCKS_PER_SECTOR - 1) * MIFARE_BLOCK_SIZE;
+    if (haveA) {
+      memcpy(trailer, keyA, 6);
+    }
+    if (haveB) {
+      memcpy(trailer + 10, keyB, 6);
+    }
+    emitDumpSector(s, data, useA ? "A" : "B", nullptr);
+    (*read)++;
+    if (s == 0) {
+      emitCard0(data);
+    }
+  }
+  return SWEEP_DONE;
+}
+
+// The standalone workflow (Fase 4, tarea 4.4): with no PC attached, the
+// firmware finishes the job by itself - dump the sectors the sweep cracked
+// and emit everything over serial.
+//
+// Control is ceded BETWEEN the steps (control.poll()), never inside one: a
+// command arriving mid-dump would touch the very card session the dump is
+// using, so `mifare ...` is refused while the chain runs (see
+// bomberCatCommand).
+static void runStandaloneChain() {
+  mifareChainActive = true;
+  control.poll(); // cede control between the steps
+
+  uint8_t read = 0, failed = 0;
+  SweepResult res = runSectorDump(mifareSweepSectors, &read, &failed);
+  mifareChainActive = false;
+  if (res == SWEEP_CARD_REMOVED) {
+    beginCardRemovalWait();
+    return;
+  }
+  Serial.print(":mifare_dump_stat read=");
+  Serial.print(read);
+  Serial.print(" failed=");
+  Serial.print(failed);
+  Serial.print(" total=");
+  Serial.println(mifareSweepSectors);
+  Serial.flush();
+}
+
+// `mifare dump [--sectors <n>]` -> :mifare_dump_sN <hex128|-> <A|B|-> per
+// sector, :mifare_dump_stat read=<n> failed=<n> total=<n>, +OK.
+//
+// Reads the card with the keys the last sweep recovered (the cache), so the
+// card is read ONCE: no second sweep, no per-sector host round-trip. Needs a
+// sweep first - `mifare check` (or the on-detection auto-probe) fills it.
+void handleMifareDump(char *args) {
+  uint8_t sectors =
+      mifareSweepValid ? mifareSweepSectors : MIFARE_CHECK_DEFAULT_SECTORS;
+  char *tok;
+  while ((tok = nextArg(&args)) != nullptr) {
+    if (strcmp(tok, "--sectors") == 0) {
+      char *v = nextArg(&args);
+      int n = (v != nullptr) ? atoi(v) : 0;
+      if (n < 1 || n > MIFARE_CHECK_MAX_SECTORS) {
+        replyErr("usage: mifare dump [--sectors <1..32>]");
+        return;
+      }
+      sectors = (uint8_t)n;
+    } else {
+      replyErr("usage: mifare dump [--sectors <1..32>]");
+      return;
+    }
+  }
+  if (!mifareSweepValid) {
+    replyErr("no sweep results yet - run 'mifare check' first");
+    return;
+  }
+  // Never read past what the sweep covered: those sectors have no keys.
+  if (sectors > mifareSweepSectors) {
+    sectors = mifareSweepSectors;
+  }
+
+  uint8_t read = 0, failed = 0;
+  if (runSectorDump(sectors, &read, &failed) == SWEEP_CARD_REMOVED) {
+    beginCardRemovalWait();
+    replyErr("card removed mid-dump, tap a card again");
+    return;
+  }
+  Serial.print(":mifare_dump_stat read=");
+  Serial.print(read);
+  Serial.print(" failed=");
+  Serial.print(failed);
+  Serial.print(" total=");
+  Serial.println(sectors);
+  Serial.flush();
+  // A dump may have overrun the idle window while loop() was blocked; give a
+  // follow-up REPL command the full window again.
+  mifareSessionDeadline = millis() + MIFARE_SESSION_IDLE_MS;
+  replyOk();
+}
+
+// `mifare standalone [on|off]` -> +OK standalone on|off
+//
+// Standalone mode (Fase 4, tarea 4.4): with no PC attached, the firmware runs
+// the whole field workflow by itself when a card is detected - sweep, dump the
+// sectors it cracked, emit everything over serial, and store the custom keys
+// it confirmed. The flag persists with the key-store, so it survives a reset.
+void handleMifareStandalone(char *args) {
+  char *mode = nextArg(&args);
+  uint8_t flags = mifareKeys.flags;
+  if (mode == nullptr) {
+    replyOk(String("standalone ") +
+            ((flags & MIFARE_KEYSTORE_FLAG_STANDALONE) ? "on" : "off"));
+    return;
+  }
+  if (strcmp(mode, "on") == 0) {
+    flags |= MIFARE_KEYSTORE_FLAG_STANDALONE;
+  } else if (strcmp(mode, "off") == 0) {
+    flags &= (uint8_t)~MIFARE_KEYSTORE_FLAG_STANDALONE;
+  } else {
+    replyErr("usage: mifare standalone [on|off]");
+    return;
+  }
+  if (flags == mifareKeys.flags) {
+    // Nothing changed: do NOT rewrite the flash record (wear).
+    replyOk(String("standalone ") +
+            ((flags & MIFARE_KEYSTORE_FLAG_STANDALONE) ? "on" : "off"));
+    return;
+  }
+  MifareKeyStore backup = mifareKeys;
+  mifareKeys.flags = flags;
+  if (!mifareKeyStoreSave(config, mifareKeys)) {
+    mifareKeys = backup; // keep RAM and flash in sync
+    replyErr("could not persist the setting (flash write failed)");
+    return;
+  }
+  replyOk(String("standalone ") +
+          ((flags & MIFARE_KEYSTORE_FLAG_STANDALONE) ? "on" : "off"));
+}
+
+// Emit the cached sweep's per-sector results (the keys the last sweep
+// recovered) in the same `:mifare_check_sN` format a fresh sweep streams.
+static void emitCachedSectors(uint8_t sectors) {
+  for (uint8_t s = 0; s < sectors; s++) {
+    bool haveA, haveB;
+    const uint8_t *keyA, *keyB;
+    sweepCacheGet(s, &haveA, &keyA, &haveB, &keyB);
+    emitCheckSector(s, haveA, keyA, haveB, keyB);
+  }
+}
+
+// `mifare check [--sectors <n>] [--keys <hex,...>] [--dump] [--fresh]
 //   -> :mifare_check_sN <keyA|-> <keyB|-> (one per sector, streamed)
 //      :mifare_check_stat attempts=<n> naive=<n> recovered=<r>/<total>
+//         trailer=<n> [cached=<0|1>] [auth_ms=… reselect_ms=… …]
 //      +OK   (or -ERR if the card leaves the field mid-sweep)
 //
 // --sectors: sectors to sweep (default 16 = 1K; max 32).
 // --keys:    comma-separated 12-hex keys that REPLACE the embedded dictionary
 //            for this run (mirrors the host `--keys`), e.g.
 //            `mifare check --keys FFFFFFFFFFFF,A0A1A2A3A4A5`.
+// --dump:    chain the dump right after the sweep, in the SAME command: the
+//            sectors the sweep cracked are read and emitted before the reply
+//            (Fase 4, tarea 4.4 - the standalone workflow in one round-trip).
+// --settle:  ms of rest between a re-select and the next authentication
+//            (default MIFARE_CHECK_SETTLE_MS = 5). The host-driven sweep gets
+//            this rest for free from its USB round-trip; the on-device sweep
+//            has to ask for it explicitly. Tunable at runtime so it can be
+//            measured on the hardware without reflashing.
+// --fresh:   sweep the card again even if the last sweep's results are still
+//            cached. By DEFAULT the command answers from the cache: the
+//            on-detection auto-probe already swept this card with the very
+//            same dictionary, and sweeping it again would cost exactly the
+//            same authentications for exactly the same result (Fase 4,
+//            Sesión 11: the device must not do the same work twice).
 void handleMifareCheck(char *args) {
   uint8_t sectors = MIFARE_CHECK_DEFAULT_SECTORS;
   const uint8_t (*dict)[6] = MIFARE_CHECK_DICT;
   uint8_t dictCount = MIFARE_CHECK_DICT_COUNT;
+  bool wantDump = false;
+  bool wantFresh = false;
+  bool haveKeyOverride = false;
   // --keys override lives in a bounded static buffer so a long list never eats
   // the stack; single-threaded REPL, so no re-entrancy concern.
   static uint8_t overrideKeys[MIFARE_CHECK_MAX_KEYS][6];
@@ -1039,7 +1778,8 @@ void handleMifareCheck(char *args) {
       char *v = nextArg(&args);
       int n = (v != nullptr) ? atoi(v) : 0;
       if (n < 1 || n > MIFARE_CHECK_MAX_SECTORS) {
-        replyErr("usage: mifare check [--sectors <1..32>] [--keys <hex,...>]");
+        replyErr("usage: mifare check [--sectors <1..32>] [--keys <hex,...>] "
+                 "[--dump]");
         return;
       }
       sectors = (uint8_t)n;
@@ -1065,8 +1805,22 @@ void handleMifareCheck(char *args) {
       }
       dict = overrideKeys;
       dictCount = n;
+      haveKeyOverride = true;
+    } else if (strcmp(tok, "--dump") == 0) {
+      wantDump = true;
+    } else if (strcmp(tok, "--fresh") == 0) {
+      wantFresh = true;
+    } else if (strcmp(tok, "--settle") == 0) {
+      char *v = nextArg(&args);
+      int n = (v != nullptr) ? atoi(v) : -1;
+      if (n < 0 || n > 1000) {
+        replyErr("usage: mifare check --settle <0..1000> (ms)");
+        return;
+      }
+      mifareCheckSettleMs = (uint16_t)n;
     } else {
-      replyErr("usage: mifare check [--sectors <1..32>] [--keys <hex,...>]");
+      replyErr("usage: mifare check [--sectors <1..32>] [--keys <hex,...>] "
+               "[--dump] [--fresh] [--settle <ms>]");
       return;
     }
   }
@@ -1082,12 +1836,78 @@ void handleMifareCheck(char *args) {
   uint8_t recovered = 0;
   const uint16_t total = (uint16_t)sectors * 2;
 
+  // Answer from the cache when the last sweep already covered this card with
+  // the very same dictionary (the on-detection auto-probe does a full sweep
+  // with the embedded dictionary + the key-store, which is exactly what this
+  // command would do). Sweeping the same card again would cost exactly the
+  // same authentications for exactly the same result — the device must not do
+  // the same work twice (Fase 4, Sesión 11). `--fresh` forces the re-sweep;
+  // an explicit `--keys` always sweeps (a different dictionary).
+  if (!wantFresh && !haveKeyOverride && mifareSweepValid &&
+      mifareSweepSectors >= sectors) {
+    emitCachedSectors(sectors);
+    Serial.print(":mifare_check_stat attempts=");
+    Serial.print(mifareSweepCacheAttempts);
+    Serial.print(" naive=");
+    Serial.print(mifareSweepCacheNaive);
+    Serial.print(" recovered=");
+    Serial.print(mifareSweepCacheRecovered);
+    Serial.print('/');
+    Serial.print(total);
+    Serial.print(" trailer=");
+    Serial.print(mifareSweepCacheTrailer);
+    Serial.print(" cached=1");
+    Serial.print(" auth_ms=");
+    Serial.print(mifareSweepCacheAuthMs);
+    Serial.print(" reselect_ms=");
+    Serial.print(mifareSweepCacheReselectMs);
+    Serial.print(" reset_ms=");
+    Serial.print(mifareSweepCacheResetMs);
+    Serial.print(" detect_ms=");
+    Serial.print(mifareSweepCacheDetectMs);
+    Serial.print(" trailer_ms=");
+    Serial.println(mifareSweepCacheTrailerMs);
+    mifareSessionDeadline = millis() + MIFARE_SESSION_IDLE_MS;
+    replyOk();
+
+    if (wantDump) {
+      uint8_t read = 0, failed = 0;
+      if (runSectorDump(sectors, &read, &failed) == SWEEP_CARD_REMOVED) {
+        beginCardRemovalWait();
+        replyErr("card removed mid-dump, tap a card again");
+        return;
+      }
+      Serial.print(":mifare_dump_stat read=");
+      Serial.print(read);
+      Serial.print(" failed=");
+      Serial.print(failed);
+      Serial.print(" total=");
+      Serial.println(sectors);
+      Serial.flush();
+    }
+    return;
+  }
+
   if (runCardSweep(sectors, dict, dictCount, known, &knownCount,
                    checkSectorSink, nullptr, &attempts, &naive,
                    &recovered) == SWEEP_CARD_REMOVED) {
     // Card left the field mid-sweep: end the session and re-arm discovery
     // (Tarea 1.7) so the host's next command gets a clean "no card" instead of
     // a hung session. Sectors already resolved were streamed.
+    beginCardRemovalWait();
+    replyErr("card removed mid-sweep, tap a card again");
+    return;
+  }
+
+  // Second pass: for every sector the dictionary opened with Key A but not
+  // with Key B, read the trailer with that Key A and take Key B off it. Same
+  // pass the host runs (check.py's _trailer_read_pass), so both sides recover
+  // the same keys from the same card.
+  uint32_t trailerAuths = 0; // counted apart: `attempts` stays comparable
+  bool cardRemoved = false;
+  trailerReadPass(sectors, checkSectorSink, nullptr, &trailerAuths, &recovered,
+                  &cardRemoved);
+  if (cardRemoved) {
     beginCardRemovalWait();
     replyErr("card removed mid-sweep, tap a card again");
     return;
@@ -1100,7 +1920,49 @@ void handleMifareCheck(char *args) {
   Serial.print(" recovered=");
   Serial.print(recovered);
   Serial.print('/');
-  Serial.println(total);
+  Serial.print(total);
+  // How many trailer reads this sweep issued. The host uses it to know the
+  // DEVICE already recovered the Key B it could read back - so it does not
+  // repeat the pass over USB (an older firmware has no such field, and then
+  // the host does it itself).
+  Serial.print(" trailer=");
+  Serial.print(trailerAuths);
+  Serial.print(" cached=0");
+  // Where the wall-clock went, measured on the board: the time inside the
+  // Crypto-1 authentication, inside the re-select (full reader re-arm +
+  // re-detection) and inside the trailer pass. The host-driven sweep issues
+  // the same number of authentications and re-selects, so these numbers are
+  // what tell the two paths apart.
+  Serial.print(" auth_ms=");
+  Serial.print(mifareSweepAuthMs);
+  Serial.print(" reselect_ms=");
+  Serial.print(mifareSweepReselectMs);
+  Serial.print(" reset_ms=");
+  Serial.print(mifareSweepResetMs);
+  Serial.print(" detect_ms=");
+  Serial.print(mifareSweepDetectMs);
+  Serial.print(" trailer_ms=");
+  Serial.println(mifareSweepTrailerMs);
+
+  // Optional: chain the dump right here, in the same command (Fase 4, tarea
+  // 4.4) - the sectors the sweep cracked are read and emitted before the
+  // reply, so the whole workflow is ONE round-trip.
+  if (wantDump) {
+    uint8_t read = 0, failed = 0;
+    if (runSectorDump(sectors, &read, &failed) == SWEEP_CARD_REMOVED) {
+      beginCardRemovalWait();
+      replyErr("card removed mid-dump, tap a card again");
+      return;
+    }
+    Serial.print(":mifare_dump_stat read=");
+    Serial.print(read);
+    Serial.print(" failed=");
+    Serial.print(failed);
+    Serial.print(" total=");
+    Serial.println(sectors);
+    Serial.flush();
+  }
+
   // A long sweep may have overrun the idle window while loop() was blocked;
   // give a follow-up REPL command the full window again.
   mifareSessionDeadline = millis() + MIFARE_SESSION_IDLE_MS;
@@ -1180,6 +2042,8 @@ void handleMifareKeys(char *args) {
       return;
     }
     replyOk(String("added ") + TagReader::hexCompact(key, 6));
+    // The dictionary just changed: the cached sweep used the old one.
+    sweepCacheInvalidate();
     return;
   }
 
@@ -1227,6 +2091,8 @@ void handleMifareKeys(char *args) {
       return;
     }
     replyOk(String("removed ") + TagReader::hexCompact(removed, 6));
+    // The dictionary just changed: the cached sweep used the old one.
+    sweepCacheInvalidate();
     return;
   }
 
@@ -1243,6 +2109,8 @@ void handleMifareKeys(char *args) {
       return;
     }
     replyOk("key store cleared");
+    // The dictionary just changed: the cached sweep used the old one.
+    sweepCacheInvalidate();
     return;
   }
 
@@ -1283,17 +2151,84 @@ void handleMifareKeys(char *args) {
            "|clear|autostore [on|off]]");
 }
 
-// `mifare <auth|read|write|sector|keys|check> ...` dispatch. `keys` needs no
-// card; the rest require an open session (Decision 5) - see the file header.
+// `mifare timing [reset]` -> :mifare_timing attempts=… reselects=… auth_ms=…
+// reselect_ms=… reset_ms=… detect_ms=… trailer_ms=… +OK
+//
+// The wall-clock split of everything the board did with the card since the
+// last reset (Fase 4, Sesión 11). The host-driven sweep and the on-device one
+// are measured with the SAME counters, so their difference can be attributed
+// instead of guessed: `auth_ms` is the time inside the Crypto-1
+// authentication, `reselect_ms` the time inside the re-select that follows a
+// wrong key, and that re-select is split into `reset_ms` (the reader re-arm)
+// and `detect_ms` (waiting for the card to be found again).
+//
+// `mifare timing reset` zeroes the counters, so a measurement can start from
+// a clean slate. Needs no card.
+void handleMifareTiming(char *args) {
+  char *sub = nextArg(&args);
+  if (sub != nullptr && strcmp(sub, "reset") == 0) {
+    mifareSweepAuthMs = 0;
+    mifareSweepReselectMs = 0;
+    mifareSweepResetMs = 0;
+    mifareSweepDetectMs = 0;
+    mifareSweepTrailerMs = 0;
+    mifareSweepAttempts = 0;
+    mifareSweepReselects = 0;
+    replyOk("counters reset");
+    return;
+  }
+  Serial.print(":mifare_timing attempts=");
+  Serial.print(mifareSweepAttempts);
+  Serial.print(" reselects=");
+  Serial.print(mifareSweepReselects);
+  Serial.print(" auth_ms=");
+  Serial.print(mifareSweepAuthMs);
+  Serial.print(" reselect_ms=");
+  Serial.print(mifareSweepReselectMs);
+  Serial.print(" reset_ms=");
+  Serial.print(mifareSweepResetMs);
+  Serial.print(" detect_ms=");
+  Serial.print(mifareSweepDetectMs);
+  Serial.print(" trailer_ms=");
+  Serial.print(mifareSweepTrailerMs);
+  // The detection diagnostics of the core: how many waits, how many found the
+  // card, how many expired and how many unrelated notifications were drained
+  // on the way. They tell a "the card left" from a "the notification was
+  // missed" apart, on the hardware.
+  Serial.print(" det_calls=");
+  Serial.print(nfc.waitTagCalls);
+  Serial.print(" det_ok=");
+  Serial.print(nfc.waitTagOk);
+  Serial.print(" det_timeout=");
+  Serial.print(nfc.waitTagTimeout);
+  Serial.print(" det_ntf=");
+  Serial.println(nfc.waitTagNotifications);
+  replyOk();
+}
+
+// `mifare <auth|read|write|sector|keys|check|dump|standalone|timing> ...`
+// dispatch. `keys`, `standalone` and `timing` need no card; the rest require
+// an open session (Decision 5) - see the file header.
 void handleMifareCommand(char *args) {
   char *sub = nextArg(&args);
   if (sub == nullptr) {
-    replyErr("usage: mifare <auth|read|write|sector|keys|check> ...");
+    replyErr("usage: mifare <auth|read|write|sector|keys|check|dump|standalone"
+             "|timing> ...");
     return;
   }
 
   if (strcmp(sub, "keys") == 0) {
     handleMifareKeys(args);
+    return;
+  }
+
+  if (strcmp(sub, "standalone") == 0) {
+    handleMifareStandalone(args);
+    return;
+  }
+
+  if (strcmp(sub, "timing") == 0) {
+    handleMifareTiming(args);
     return;
   }
 
@@ -1314,6 +2249,8 @@ void handleMifareCommand(char *args) {
     handleMifareSector(args);
   } else if (strcmp(sub, "check") == 0) {
     handleMifareCheck(args);
+  } else if (strcmp(sub, "dump") == 0) {
+    handleMifareDump(args);
   } else {
     replyErr("unknown mifare subcommand");
   }
@@ -1323,6 +2260,12 @@ void handleMifareCommand(char *args) {
 bool bomberCatCommand(const char *verb, char *args) {
   if (strcmp(verb, "mifare") != 0) {
     return false;
+  }
+  if (mifareChainActive) {
+    // The standalone chain is using the card right now. Refuse instead of
+    // letting the command touch the very session the chain is in.
+    replyErr("busy - the card workflow is running");
+    return true;
   }
   handleMifareCommand(args);
   return true;

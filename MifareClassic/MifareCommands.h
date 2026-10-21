@@ -35,7 +35,13 @@ bool mifareAuthenticate(NfcController &nfc, uint8_t blockNum, uint8_t keyType,
 // selected state. Returns true if a card was re-selected within `timeoutMs`,
 // false if none is in the field any more. See the .cpp for the hardware note
 // on why this uses the full reader re-arm.
-bool mifareReselect(NfcController &nfc, uint16_t timeoutMs = 500);
+//
+// The detection window has to be generous: the card is HALTed by the failed
+// authentication and the PN7150 has to wake it up and re-activate it, which
+// takes longer than the ~15 ms of a warm re-detection (measured). A window
+// that expires too early makes the firmware believe the card left when it is
+// right there (Fase 4, Sesión 11).
+bool mifareReselect(NfcController &nfc, uint16_t timeoutMs = 2000);
 
 // Read one 16-byte block into `buffer` (`bufferLen` set to the bytes
 // written). Requires a prior successful mifareAuthenticate() on the same

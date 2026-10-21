@@ -58,6 +58,157 @@ Errores (tarjeta retirada a mitad, timeout, fallo I²C) → terminador `-ERR`:
 El `attempts=` on-device debe ser **≤** el `stats.attempts` del `baseline.json`
 del host (criterio de aceptación global #2: no aumentar el nº de auths).
 
+### consumption por el host (Fase 4, tarea 4.1 — implementado)
+
+`bombercat tags mifare check --mode device` consume **este** formato: envía una
+sola línea `mifare check --sectors N [--keys k1,k2,…]` y parsea la respuesta
+consolidada (`modules/tags/mifare/device_sweep.py` en `bombercat-tools`).
+
+- El **contador de auths pasa a ser el del firmware**: en modo device el pin
+  `attempts ≤ 66` se lee de `:mifare_check_stat attempts=…`, no del recuento de
+  líneas `mifare auth` que hace el host. Es el mismo número de autenticaciones
+  reales contra la tarjeta, contado por quien las emite.
+- El `recovered=r/total` del firmware cuenta **slots (sector, tipo de clave)**,
+  igual que el `recovered` del host (2 slots por sector).
+- Un token que no sea una clave de 12 hex se trata como **hueco**, nunca como
+  una clave adivinada.
+- Si el firmware no conoce el comando (`-ERR unknown mifare subcommand`) o
+  contesta sin datos de barrido, el host cae al barrido comando-a-comando
+  (fallback) en modo `auto`, y falla con un error claro en modo `device`.
+- La auto-prueba de la Fase 2 emite las mismas líneas `:mifare_check_sN` pero
+  **sin** línea de stat: es un barrido distinto (diccionario embebido, sin
+  `--keys`), no la respuesta del comando `mifare check`.
+
+### lectura de trailer (Fase 4, tarea 4.4 — implementado)
+
+Tras el barrido, el firmware hace **una pasada más**: por cada sector que el
+diccionario abrió con Key A pero **no** con Key B, lee el *trailer* con esa Key A
+y se lleva el Key B que la tarjeta devuelva en claro. No es un ataque
+Crypto-1 (el PN7150 nunca expone nonces/paridad): es una **lectura** del
+trailer, y solo la dan las tarjetas cuyos access bits dejan el Key B legible
+con Key A (configuración de transporte).
+
+Es exactamente la misma pasada que hace el host (`check.py`'s
+`_trailer_read_pass`), con las mismas reglas — el Key B solo se acepta cuando
+los access bits dicen "key A" (no "key A or B"), y un Key B de ceros se
+declara **no recuperado** en vez de darse por bueno. La lógica de access bits
+está replicada en el firmware (`MifareAccessBits`, un port de `access_bits.py`)
+y la paridad se **verifica** con un test nativo
+(`bombercat-tools/tests/test_mifare_parity.py`), no se afirma en un comentario.
+
+La línea de stat gana un campo:
+
+```
+:mifare_check_stat attempts=66 naive=1024 recovered=32/32 trailer=0
+```
+
+- `trailer=` es el número de lecturas de trailer que hizo el barrido. Su
+  presencia le dice al host que **el dispositivo ya hizo la pasada**: el host
+  no la repite (serían un round-trip USB por sector para nada). Un firmware
+  viejo no tiene ese campo → el host hace su propia pasada, como siempre.
+
+Cuando la pasada recupera un Key B, el firmware **reemite** la línea del sector
+con la Key B ya rellena (el host se queda con la última línea por sector):
+
+```
+:mifare_check_s0 A0A1A2A3A4A5 AABBCCDDEEFF
+```
+
+### línea de stat del barrido (Fase 4, Sesión 11)
+
+```
+:mifare_check_stat attempts=79 naive=1024 recovered=32/32 trailer=0 cached=0
+                 auth_ms=1229 reselect_ms=6177 reset_ms=5085 detect_ms=1092 trailer_ms=0
+```
+
+- `attempts=` / `naive=` / `recovered=` — como hasta ahora (el pin de no
+  regresión es `attempts ≤ 66` en la `card_1k`).
+- `trailer=` — lecturas de trailer que hizo el barrido (ver arriba).
+- `cached=0|1` — `1` cuando la respuesta viene del **barrido en caché**: el
+  firmware ya había barrido esa tarjeta (la auto-prueba de detección lo hace
+  con el mismo diccionario) y **no repite el trabajo**. El host lo dice en
+  pantalla; con `cached=1` **no se ha emitido ninguna autenticación nueva**.
+- `auth_ms` / `reselect_ms` / `reset_ms` / `detect_ms` / `trailer_ms` — el
+  reparto del reloj de pared, **medido en la placa**:
+  - `auth_ms`: tiempo dentro de la autenticación Crypto-1 (≈16 ms);
+  - `reselect_ms`: tiempo dentro del re-select que sigue a una clave
+    equivocada (≈78 ms), repartido en
+  - `reset_ms`: el re-arm completo del lector (≈65 ms) y
+  - `detect_ms`: la espera a que la tarjeta vuelva a ser detectada (≈14 ms).
+
+  Con estas cifras se puede comparar el barrido del host con el on-device
+  **sin cronómetro**: los dos emiten el mismo número de autenticaciones, así
+  que la diferencia se atribuye al reparto, no a una impresión.
+
+### `mifare timing [reset]` (Fase 4, Sesión 11)
+
+Contadores acumulados del board, para medir sin cronómetro:
+
+```
+:mifare_timing attempts=79 reselects=78 auth_ms=1231 reselect_ms=6177
+                reset_ms=5085 detect_ms=1092 trailer_ms=0
+                det_calls=80 det_ok=80 det_timeout=0 det_ntf=0
+```
+
+- `det_calls` / `det_ok` / `det_timeout` / `det_ntf` — diagnóstico de la
+  detección: cuántas esperas, cuántas encontraron la tarjeta, cuántas
+  expiraron y cuántas notificaciones ajenas se drenaron. Sirven para
+  distinguir "la tarjeta se fue" de "se perdió la notificación".
+
+### el dump on-device (Fase 4, tarea 4.4 — implementado)
+
+```
+:mifare_dump_s0 <hex128|-> <A|B|-> [motivo]
+:mifare_dump_s1 - - nokey
+:mifare_dump_stat read=1 failed=1 total=2
+:mifare_card0 <hex32> uid=<hex8> sak=<hex2> atqa=<hex4> bcc=<hex2> bcc_ok=<0|1>
++OK
+```
+
+- Una línea por sector: los 4 bloques en hex (128 chars) o `-` si el sector
+  es un hueco, la clave que lo abrió (`A`/`B`) y — cuando no se pudo leer — el
+  motivo (`nokey`, `readfail`, `removed`). **Los huecos se declaran, nunca se
+  rellenan con ceros.**
+- El firmware **sustituye las claves recuperadas en el trailer** (la tarjeta
+  nunca devuelve la Key A, y a menudo tampoco la Key B), igual que hace el
+  dump del host (`display.py`'s `_substitute_trailer_keys`): los dos dumps
+  llevan los mismos bytes.
+- `:mifare_card0` lleva el bloque 0 **crudo** más su disección. El host lo
+  re-parsea con su propio `block0.py` — la misma lógica que el firmware
+  aplicó (`MifareBlock0`, un port de `block0.py`, con paridad verificada por
+  test nativo) — así que ambos lados llegan al mismo veredicto. El firmware
+  además contrasta el UID del bloque 0 con el UID de anticolisión y avisa si
+  difieren (tarjeta clonada/magic).
+- El dump usa las claves que el **último barrido** recuperó (el firmware las
+  guarda en RAM), así que la tarjeta se lee **una vez**: no hay segundo
+  barrido ni un round-trip por sector.
+
+### modo standalone (Fase 4, tarea 4.4 — implementado)
+
+`mifare standalone [on|off]` (flag persistido con el key-store):
+
+```
++OK standalone on
+```
+
+Con el modo standalone **encendido**, al detectar una tarjeta el firmware hace
+la cadena completa por su cuenta — **detectar → barrido → dump → emitir →
+almacenar** — sin PC conectado:
+
+1. la auto-prueba barre los sectores (como siempre);
+2. la pasada de trailer recupera las Key B que se pueden leer;
+3. el firmware cede el control (`control.poll()`) **entre pasos**, nunca
+   dentro de uno: un comando que llegue a mitad de dump tocaría la sesión de
+   tarjeta que el dump está usando, así que `mifare ...` se rechaza con
+   `-ERR busy - the card workflow is running` mientras la cadena corre;
+4. se emite el dump (`mifare_dump_sN` + `mifare_dump_stat` + `mifare_card0`);
+5. se guardan las claves propias confirmadas (si `mifare keys autostore on`).
+
+El comando `mifare check --dump` hace la cadena (barrido + dump) en **un solo
+comando**, para el host que sí está conectado; `mifare dump` a secas usa las
+claves del último barrido.
+
+
 ## Notas de implementación (Fase 1)
 
 - Emitir cada línea `:mifare_check_sN` **en cuanto el sector se resuelve** (streaming),
