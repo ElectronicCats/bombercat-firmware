@@ -2830,7 +2830,8 @@ void handleMifareKeys(char *args) {
     }
     if (flags == mifareKeys.flags) {
       // Nothing changed: do NOT rewrite the flash record (wear).
-      replyOk(String("autostore ") + (flags ? "on" : "off"));
+      replyOk(String("autostore ") +
+              ((flags & MIFARE_KEYSTORE_FLAG_AUTOSTORE) ? "on" : "off"));
       return;
     }
     MifareKeyStore backup = mifareKeys;
@@ -2840,7 +2841,8 @@ void handleMifareKeys(char *args) {
       replyErr("could not persist the key store (flash write failed)");
       return;
     }
-    replyOk(String("autostore ") + (flags ? "on" : "off"));
+    replyOk(String("autostore ") +
+            ((flags & MIFARE_KEYSTORE_FLAG_AUTOSTORE) ? "on" : "off"));
     return;
   }
 
