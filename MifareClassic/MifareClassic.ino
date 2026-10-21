@@ -64,6 +64,7 @@
 #include "MifareClassic.h"
 #include "MifareCommands.h"
 #include "MifareKeyStore.h"
+#include "MifareResultStore.h"
 #include "MifareStandaloneTrigger.h"
 
 NfcController nfc;
@@ -83,6 +84,28 @@ static bool tagSessionActive = false; // drives control.state()
 // persistence.
 ConfigStore config;
 MifareKeyStore mifareKeys;
+
+// The results of the standalone runs (Fase 4, tarea 4.6).
+//
+// The standalone workflow reads a card with NO PC attached: the dump goes out
+// over the serial port, where nobody is listening when the board is in the
+// field. The ring below keeps the last MIFARE_RESULT_SLOTS results in the
+// board's own flash, so the operator collects them later, over USB, and gets
+// the very same canonical dump - with its holes - that the connected
+// workflow produces.
+//
+// The store is fed through ConfigStore's blob API (the SAME TDBStore
+// instance the key-store uses - mounting a second FlashIAPBlockDevice over
+// the same region would collide), so a stored result costs ONE flash write
+// per card and survives a reset.
+static MifareResultStore mifareResults;
+// The buffer the standalone chain fills with the result it just read. It is
+// the caller's own buffer (not the store's) so that scanning the ring and
+// building a result never fight over the same bytes.
+static MifareResultRecord mifareResultBuild;
+// True when the flash is usable: without it there is nowhere to keep the
+// results, and the firmware says so instead of failing silently.
+static bool mifareResultsReady = false;
 
 // Block read back on every Mifare Classic detection for the legacy ":mifare"
 // session-open signal event (see probeMifareBlock()), matching
@@ -412,6 +435,7 @@ void handleMifareCheck(char *args);
 void handleMifareDump(char *args);
 void handleMifareKeys(char *args);
 void handleMifareStandalone(char *args);
+void handleMifareResults(char *args);
 void handleMifareTrigger(char *args);
 void handleMifareTiming(char *args);
 void emitKnownKeys();
@@ -422,6 +446,9 @@ static uint8_t trailerReadPass(uint8_t sectors, SweepSectorSink sink, void *ctx,
                                uint32_t *trailerAuths, uint8_t *recovered,
                                bool *removed);
 static void runStandaloneChain();
+static bool storeStandaloneResult(MifareResultRecord &record, uint8_t read,
+                                  uint8_t failed);
+static void emitStoredResult(const MifareResultRecord &record);
 static void pollStandaloneTrigger();
 static void onTriggerShort();
 static void onTriggerLong();
@@ -430,6 +457,25 @@ static void mifareIdentifyLed();
 static bool runFieldSweepNow();
 static TrailerReadResult
 recoverKeyBViaTrailer(uint8_t sector, const uint8_t *keyA, uint8_t outKeyB[6]);
+
+// The ring's flash: ConfigStore's generic blob API (added in Fase 3 for the
+// key-store), so both live in the same TDBStore without colliding.
+//
+// They live HERE, and not with the globals above, because the Arduino
+// builder inserts the auto-generated prototypes right before the FIRST
+// function of the sketch: a function defined above the type declarations
+// would push those prototypes in front of the enums this file declares
+// (SweepResult, AutoProbeCtx…), and the sketch would not compile.
+static bool mifareResultBlobRead(const char *key, void *buf, size_t size) {
+  return config.loadBlob(key, buf, size);
+}
+static bool mifareResultBlobWrite(const char *key, const void *buf,
+                                  size_t size) {
+  return config.saveBlob(key, buf, size);
+}
+static bool mifareResultBlobClear(const char *key) {
+  return config.clearBlob(key);
+}
 
 void setup() {
   Serial.begin(115200);
@@ -457,9 +503,21 @@ void setup() {
     } else {
       Serial.println("Mifare key-store: empty.");
     }
+    // The standalone result ring (Fase 4, tarea 4.6) lives in the same
+    // TDBStore, through the same blob API. The ring is NOT scanned here: the
+    // scan reads eight records, and nothing needs it until a result is
+    // stored or asked for.
+    MifareResultBlob blob;
+    blob.read = mifareResultBlobRead;
+    blob.write = mifareResultBlobWrite;
+    blob.clear = mifareResultBlobClear;
+    mifareResults.setBlob(blob);
+    mifareResultsReady = true;
   } else {
     Serial.println("Mifare key-store unavailable (flash init failed); custom "
                    "keys will not persist.");
+    Serial.println("Standalone results unavailable (flash init failed); the "
+                   "board will not keep the dumps it reads.");
   }
 
   BomberCatControl::Callbacks cb;
@@ -1686,6 +1744,28 @@ static void emitDumpSector(uint8_t sector, const uint8_t *data,
 static void emitCard0(const uint8_t *sector0) {
   MifareBlock0 b0;
   mifareParseBlock0(sector0, b0);
+  emitCard0Raw(sector0);
+
+  const String uidHex = TagReader::hexCompact(b0.uid, 4);
+  if (mifareCardUid.length() > 0 && mifareCardUid != uidHex) {
+    Serial.println("WARNING: the UID in block 0 differs from the tag UID "
+                   "(clone/magic card?)");
+  }
+}
+
+// The raw `:mifare_card0` line: the block the card returned, dissected with
+// the SAME rules as the host's block0.py (the firmware's MifareBlock0 is a
+// port of it). Emitted raw AND dissected: a host that has block0.py re-parses
+// the raw bytes and gets the identical verdict, and one that doesn't can
+// still read the fields.
+//
+// Split from emitCard0() because the cross-check against the anti-collision
+// UID only makes sense for a card that is IN the field right now: a stored
+// result (Fase 4, tarea 4.6) is replayed later, when a DIFFERENT card may be
+// on the reader - and the warning would then be a lie.
+static void emitCard0Raw(const uint8_t *sector0) {
+  MifareBlock0 b0;
+  mifareParseBlock0(sector0, b0);
   Serial.print(":mifare_card0 ");
   Serial.print(TagReader::hexCompact(sector0, MIFARE_BLOCK_SIZE));
   Serial.print(" uid=");
@@ -1697,15 +1777,8 @@ static void emitCard0(const uint8_t *sector0) {
   Serial.print(" bcc=");
   Serial.print(TagReader::hexCompact(&b0.bcc, 1));
   Serial.print(" bcc_ok=");
-  Serial.print(b0.bccValid ? 1 : 0);
-  Serial.println();
+  Serial.println(b0.bccValid ? 1 : 0);
   Serial.flush();
-
-  const String uidHex = TagReader::hexCompact(b0.uid, 4);
-  if (mifareCardUid.length() > 0 && mifareCardUid != uidHex) {
-    Serial.println("WARNING: the UID in block 0 differs from the tag UID "
-                   "(clone/magic card?)");
-  }
 }
 
 // Read every sector the sweep cracked and emit it.
@@ -1713,14 +1786,22 @@ static void emitCard0(const uint8_t *sector0) {
 // The keys come from the sweep cache, so the card is read ONCE: no second
 // sweep, no per-sector host round-trip. A sector with no recovered key is an
 // honest hole ("nokey"), never a guess.
+//
+// `collect` is where the same result is kept for the flash (Fase 4, tarea
+// 4.6): when it is not null, every sector's outcome - INCLUDING the reason
+// of a hole - is copied into it, so the stored result says exactly what the
+// serial dump said.
 static SweepResult runSectorDump(uint8_t sectors, uint8_t *read,
-                                 uint8_t *failed) {
+                                 uint8_t *failed, MifareResultRecord *collect) {
   for (uint8_t s = 0; s < sectors; s++) {
     bool haveA, haveB;
     const uint8_t *keyA, *keyB;
     sweepCacheGet(s, &haveA, &keyA, &haveB, &keyB);
     if (!haveA && !haveB) {
       emitDumpSector(s, nullptr, "-", "nokey");
+      if (collect != nullptr) {
+        mifareResultSetSector(*collect, s, MIFARE_RESULT_NOKEY, '-', nullptr);
+      }
       (*failed)++;
       continue;
     }
@@ -1731,6 +1812,9 @@ static SweepResult runSectorDump(uint8_t sectors, uint8_t *read,
     // Independent auth: never ride a warm session from a previous sector.
     if (!mifareBeginAuth()) {
       emitDumpSector(s, nullptr, "-", "removed");
+      if (collect != nullptr) {
+        mifareResultSetSector(*collect, s, MIFARE_RESULT_REMOVED, '-', nullptr);
+      }
       (*failed)++;
       return SWEEP_CARD_REMOVED;
     }
@@ -1741,10 +1825,18 @@ static SweepResult runSectorDump(uint8_t sectors, uint8_t *read,
       if (!mifareReselect(nfc)) {
         beginCardRemovalWait();
         emitDumpSector(s, nullptr, "-", "removed");
+        if (collect != nullptr) {
+          mifareResultSetSector(*collect, s, MIFARE_RESULT_REMOVED, '-',
+                                nullptr);
+        }
         (*failed)++;
         return SWEEP_CARD_REMOVED;
       }
       emitDumpSector(s, nullptr, "-", "readfail");
+      if (collect != nullptr) {
+        mifareResultSetSector(*collect, s, MIFARE_RESULT_READFAIL, '-',
+                              nullptr);
+      }
       (*failed)++;
       continue;
     }
@@ -1763,6 +1855,12 @@ static SweepResult runSectorDump(uint8_t sectors, uint8_t *read,
       memcpy(trailer + 10, keyB, 6);
     }
     emitDumpSector(s, data, useA ? "A" : "B", nullptr);
+    if (collect != nullptr) {
+      // AFTER the substitution: the stored bytes are the very bytes the
+      // serial dump emitted.
+      mifareResultSetSector(*collect, s, MIFARE_RESULT_READ, useA ? 'A' : 'B',
+                            data);
+    }
     (*read)++;
     if (s == 0) {
       emitCard0(data);
@@ -1783,12 +1881,34 @@ static void runStandaloneChain() {
   mifareChainActive = true;
   control.poll(); // cede control between the steps
 
+  // The result the board keeps for the operator (Fase 4, tarea 4.6): the very
+  // dump it is emitting, holes included, stored in its own flash so it can
+  // be collected later, over USB, when nobody was listening to the serial
+  // port.
+  mifareResultInit(mifareResultBuild);
+  mifareResultBuild.sectors = mifareSweepSectors;
+  mifareResultBuild.tsMs = millis();
+  strncpy(mifareResultBuild.uid, mifareCardUid.c_str(),
+          sizeof(mifareResultBuild.uid) - 1);
+  mifareResultBuild.uid[sizeof(mifareResultBuild.uid) - 1] = '\0';
+
   uint8_t read = 0, failed = 0;
-  SweepResult res = runSectorDump(mifareSweepSectors, &read, &failed);
+  SweepResult res =
+      runSectorDump(mifareSweepSectors, &read, &failed, &mifareResultBuild);
   mifareChainActive = false;
   if (res == SWEEP_CARD_REMOVED) {
+    // The card left the field in the middle of the dump. The sectors that
+    // were never reached are holes with the "removed" reason - the card was
+    // GONE, not unopenable - and the partial result is still a result: it
+    // is emitted and kept, with its counters saying exactly what happened.
+    for (uint8_t s = 0; s < mifareResultBuild.sectors; s++) {
+      if (mifareResultBuild.status[s] == MIFARE_RESULT_MISSING) {
+        mifareResultSetSector(mifareResultBuild, s, MIFARE_RESULT_REMOVED, '-',
+                              nullptr);
+        failed++;
+      }
+    }
     beginCardRemovalWait();
-    return;
   }
   Serial.print(":mifare_dump_stat read=");
   Serial.print(read);
@@ -1797,6 +1917,89 @@ static void runStandaloneChain() {
   Serial.print(" total=");
   Serial.println(mifareSweepSectors);
   Serial.flush();
+
+  // Keep the result in the flash (ONE write per card, never per key).
+  storeStandaloneResult(mifareResultBuild, read, failed);
+}
+
+// Store the result of a standalone run in the flash ring.
+//
+// ONE write per card: the record goes into the slot that holds the OLDEST
+// result (or the first free one), so the ring always keeps the newest
+// results. The erases are the store's own business (mbed's TDBStore rewrites
+// its whole area when it fills up - about every 450 results stored, orders of
+// magnitude below the flash's 100k erase cycles); this store only ever
+// APPENDS one record per card.
+//
+// A failed write is NOT fatal: the result was already emitted over the
+// serial port, so the run is not lost - only the copy that would have been
+// collected later is. The failure is said out loud instead of passing
+// unnoticed.
+static bool storeStandaloneResult(MifareResultRecord &record, uint8_t read,
+                                  uint8_t failed) {
+  if (!mifareResultsReady) {
+    Serial.println(":mifare_result_saved error flash-unavailable");
+    Serial.flush();
+    return false;
+  }
+  record.read = read;
+  record.failed = failed;
+  if (!mifareResults.store(record)) {
+    Serial.println(":mifare_result_saved error flash-write-failed");
+    Serial.flush();
+    return false;
+  }
+  Serial.print(":mifare_result_saved seq=");
+  Serial.print(record.seq);
+  Serial.print(" slot=");
+  Serial.print(record.slot);
+  Serial.print(" read=");
+  Serial.print(read);
+  Serial.print(" failed=");
+  Serial.println(failed);
+  Serial.flush();
+  return true;
+}
+
+// Emit a stored result in the very same wire format a live dump uses:
+// `:mifare_dump_sN <hex128|-> <A|B|-> [reason]` per sector, the counters and
+// the dissected block 0. The host parses it with the code it already has, so
+// a result collected later is indistinguishable from one read with the PC
+// attached - including its holes, which are declared, never filled.
+static void emitStoredResult(const MifareResultRecord &record) {
+  for (uint8_t s = 0; s < record.sectors && s < MIFARE_RESULT_MAX_SECTORS;
+       s++) {
+    const uint8_t status = record.status[s];
+    if (status == MIFARE_RESULT_READ) {
+      const char *keyType = "-";
+      if (record.keyType[s] == 'A') {
+        keyType = "A";
+      } else if (record.keyType[s] == 'B') {
+        keyType = "B";
+      }
+      emitDumpSector(s, record.data[s], keyType, nullptr);
+      continue;
+    }
+    const char *reason = mifareResultReason(status);
+    if (reason[0] == '\0') {
+      reason = "nokey"; // a sector the card does not have: an honest hole
+    }
+    emitDumpSector(s, nullptr, "-", reason);
+  }
+  Serial.print(":mifare_dump_stat read=");
+  Serial.print(record.read);
+  Serial.print(" failed=");
+  Serial.print(record.failed);
+  Serial.print(" total=");
+  Serial.println(record.sectors);
+  Serial.flush();
+  // The block 0 the card returned, dissected with the firmware's own
+  // MifareBlock0 (the twin of the host's block0.py). NOT emitCard0(): the
+  // cross-check against the anti-collision UID is about the card that is in
+  // the field NOW, and this result may be replayed hours later.
+  if (record.sectors > 0 && record.status[0] == MIFARE_RESULT_READ) {
+    emitCard0Raw(record.data[0]);
+  }
 }
 
 // `mifare dump [--sectors <n>]` -> :mifare_dump_sN <hex128|-> <A|B|-> per
@@ -1833,7 +2036,10 @@ void handleMifareDump(char *args) {
   }
 
   uint8_t read = 0, failed = 0;
-  if (runSectorDump(sectors, &read, &failed) == SWEEP_CARD_REMOVED) {
+  // Not stored in the flash: this dump is driven by a host that is RIGHT
+  // THERE and receives it over the serial port. Only the standalone run
+  // (no PC attached) keeps a copy for later.
+  if (runSectorDump(sectors, &read, &failed, nullptr) == SWEEP_CARD_REMOVED) {
     beginCardRemovalWait();
     replyErr("card removed mid-dump, tap a card again");
     return;
@@ -1888,6 +2094,117 @@ void handleMifareStandalone(char *args) {
   }
   replyOk(String("standalone ") +
           ((flags & MIFARE_KEYSTORE_FLAG_STANDALONE) ? "on" : "off"));
+}
+
+// --- Fase 4 (tarea 4.6): the results the board kept on its own ---------------
+//
+// `mifare results`            -> list the results the board stored, newest
+//                                first (one line per result).
+// `mifare results show <n>`   -> re-emit result n (0 = the newest) in the very
+//                                same wire format a live dump uses, so the
+//                                host parses it with the code it already has.
+// `mifare results clear`      -> erase every stored result.
+//
+// None of these need a card: the results live in the board's own flash.
+//
+// The stored result keeps the HOLES with their reason ("nokey", "readfail",
+// "removed"), so a result collected hours later says exactly what the card
+// gave and what it did not - the honest-gap rule of the plan (transversal
+// restriction #6), which is the whole point of task 4.6.
+
+void handleMifareResults(char *args) {
+  char *sub = nextArg(&args);
+  if (sub == nullptr || strcmp(sub, "list") == 0) {
+    if (!mifareResultsReady) {
+      replyErr("the results store is unavailable (flash init failed)");
+      return;
+    }
+    const uint8_t count = mifareResults.scan();
+    MifareResultMeta meta[MIFARE_RESULT_SLOTS];
+    const uint8_t n = mifareResults.list(meta, MIFARE_RESULT_SLOTS);
+    for (uint8_t i = 0; i < n; i++) {
+      Serial.print(":mifare_result");
+      Serial.print(i);
+      Serial.print(" seq=");
+      Serial.print(meta[i].seq);
+      Serial.print(" ts=");
+      Serial.print(meta[i].tsMs);
+      Serial.print(" uid=");
+      Serial.print(meta[i].uid);
+      Serial.print(" sectors=");
+      Serial.print(meta[i].sectors);
+      Serial.print(" read=");
+      Serial.print(meta[i].read);
+      Serial.print(" failed=");
+      Serial.println(meta[i].failed);
+    }
+    Serial.print(":mifare_results_stat slots=");
+    Serial.print(MIFARE_RESULT_SLOTS);
+    Serial.print(" used=");
+    Serial.print(count);
+    Serial.print(" seq=");
+    Serial.println(count > 0 ? meta[0].seq : 0);
+    Serial.flush();
+    replyOk();
+    return;
+  }
+
+  if (strcmp(sub, "show") == 0) {
+    char *idxTok = nextArg(&args);
+    int index = 0;
+    if (idxTok != nullptr) {
+      index = atoi(idxTok);
+      if (index < 0 || index >= MIFARE_RESULT_SLOTS) {
+        replyErr("usage: mifare results show [0..7]");
+        return;
+      }
+    }
+    if (!mifareResultsReady) {
+      replyErr("the results store is unavailable (flash init failed)");
+      return;
+    }
+    mifareResults.scan();
+    const MifareResultRecord *record = mifareResults.load((uint8_t)index);
+    if (record == nullptr) {
+      replyErr("no such stored result");
+      return;
+    }
+    // The result's own metadata, in the same shape the listing uses.
+    Serial.print(":mifare_result");
+    Serial.print(index);
+    Serial.print(" seq=");
+    Serial.print(record->seq);
+    Serial.print(" ts=");
+    Serial.print(record->tsMs);
+    Serial.print(" uid=");
+    Serial.print(record->uid);
+    Serial.print(" sectors=");
+    Serial.print(record->sectors);
+    Serial.print(" read=");
+    Serial.print(record->read);
+    Serial.print(" failed=");
+    Serial.println(record->failed);
+    Serial.flush();
+    // ... and the dump itself, in the live dump's format.
+    emitStoredResult(*record);
+    replyOk();
+    return;
+  }
+
+  if (strcmp(sub, "clear") == 0) {
+    if (!mifareResultsReady) {
+      replyErr("the results store is unavailable (flash init failed)");
+      return;
+    }
+    if (!mifareResults.clear()) {
+      replyErr("could not erase the stored results (flash write failed)");
+      return;
+    }
+    replyOk("results cleared");
+    return;
+  }
+
+  replyErr("usage: mifare results [list|show <0..7>|clear]");
 }
 
 // --- Fase 4 (tarea 4.3): the field trigger -----------------------------------
@@ -2245,7 +2562,10 @@ void handleMifareCheck(char *args) {
 
     if (wantDump) {
       uint8_t read = 0, failed = 0;
-      if (runSectorDump(sectors, &read, &failed) == SWEEP_CARD_REMOVED) {
+      // Host-driven: the result goes to the host over the serial port, so
+      // there is nothing to keep in the flash (only the standalone run does).
+      if (runSectorDump(sectors, &read, &failed, nullptr) ==
+          SWEEP_CARD_REMOVED) {
         beginCardRemovalWait();
         replyErr("card removed mid-dump, tap a card again");
         return;
@@ -2324,7 +2644,9 @@ void handleMifareCheck(char *args) {
   // reply, so the whole workflow is ONE round-trip.
   if (wantDump) {
     uint8_t read = 0, failed = 0;
-    if (runSectorDump(sectors, &read, &failed) == SWEEP_CARD_REMOVED) {
+    // Host-driven: the result goes to the host over the serial port, so
+    // there is nothing to keep in the flash (only the standalone run does).
+    if (runSectorDump(sectors, &read, &failed, nullptr) == SWEEP_CARD_REMOVED) {
       beginCardRemovalWait();
       replyErr("card removed mid-dump, tap a card again");
       return;
@@ -2610,14 +2932,15 @@ void handleMifareTiming(char *args) {
   replyOk();
 }
 
-// `mifare <auth|read|write|sector|keys|check|dump|standalone|trigger|timing>
-// ...` dispatch. `keys`, `standalone`, `trigger` and `timing` need no card; the
-// rest require an open session (Decision 5) - see the file header.
+// `mifare <auth|read|write|sector|keys|check|dump|standalone|results|trigger|
+// timing> ...` dispatch. `keys`, `standalone`, `results`, `trigger` and
+// `timing` need no card; the rest require an open session (Decision 5) -
+// see the file header.
 void handleMifareCommand(char *args) {
   char *sub = nextArg(&args);
   if (sub == nullptr) {
     replyErr("usage: mifare <auth|read|write|sector|keys|check|dump|standalone"
-             "|trigger|timing> ...");
+             "|results|trigger|timing> ...");
     return;
   }
 
@@ -2628,6 +2951,11 @@ void handleMifareCommand(char *args) {
 
   if (strcmp(sub, "standalone") == 0) {
     handleMifareStandalone(args);
+    return;
+  }
+
+  if (strcmp(sub, "results") == 0) {
+    handleMifareResults(args);
     return;
   }
 

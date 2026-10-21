@@ -318,6 +318,72 @@ barrido **bloquea** `loop()` (segundos o minutos según la tarjeta): una
 pulsación durante el barrido solo se ve cuando el barrido termina.
 
 
+### los resultados que guarda la placa (Fase 4, tarea 4.6 — implementado)
+
+En modo standalone nadie está escuchando el puerto serie, así que el resultado
+se perdería. El firmware guarda los **últimos 8 resultados en su propia flash**
+(la QSPI, a través de la API genérica de blobs del `ConfigStore` — el mismo
+TDBStore que usa el key-store): **una escritura por tarjeta**, y el resultado
+más antiguo es el que se sobrescribe.
+
+El registro guarda el volcado **con sus huecos y su motivo** (`nokey`,
+`readfail`, `removed`): un sector que nunca se abrió se declara, nunca se da
+por seguro (restricción transversal #6).
+
+`mifare results` (no necesita tarjeta) lista lo guardado:
+
+```
+:mifare_result0 seq=12 ts=34567 uid=AABBCCDD sectors=16 read=15 failed=1
+:mifare_result1 seq=11 ts=20100 uid=11223344 sectors=16 read=16 failed=0
+:mifare_results_stat slots=8 used=2 seq=12
++OK
+```
+
+- `seq=` — contador monótono: cuál es el más reciente.
+- `ts=` — el reloj de la placa: **milisegundos desde el arranque** (la placa
+  no tiene reloj de tiempo real). El host lo muestra como "uptime".
+- `uid=` — el UID que la placa leyó (hex).
+- `sectors=` / `read=` / `failed=` — los sectores de la tarjeta, los que se
+  leyeron y los que no.
+
+`mifare results show <n>` (0 = el más reciente) devuelve un resultado guardado
+**en el mismo formato que un volcado en vivo**, para que el host lo parseé con
+el código que ya tiene:
+
+```
+:mifare_result0 seq=12 ts=34567 uid=AABBCCDD sectors=16 read=15 failed=1
+:mifare_dump_s0 <hex128> A
+:mifare_dump_s1 - - nokey
+:mifare_dump_stat read=1 failed=1 total=2
+:mifare_card0 <hex32> uid=<hex8> sak=<hex2> atqa=<hex4> bcc=<hex2> bcc_ok=<0|1>
++OK
+```
+
+`mifare results clear` borra todos los resultados guardados.
+
+Y la cadena standalone deja rastro de lo que guardó:
+
+```
+:mifare_result_saved seq=12 slot=3 read=15 failed=1
+```
+
+o, si la flash falla (el resultado ya salió por serie, así que la lectura no se
+pierde — solo la copia que se recogería luego):
+
+```
+:mifare_result_saved error flash-write-failed
+```
+
+**Sobre el desgaste (medido contra el TDBStore de mbed):** el almacén
+**añade** cada escritura al final de la misma área y reescribe el área
+**entera** cuando se llena. Así que el anillo **no multiplica por ocho la vida
+del flash** — multiplica por ocho el **historial**. El número de borrados es
+el que era (un borrado de área por cada ~450 resultados guardados, muy por
+debajo de los 100 000 ciclos de borrado del flash), y el valor real del anillo
+es que el operador conserva las últimas N tarjetas, no que la flash dure más.
+
+---
+
 ## Notas de implementación (Fase 1)
 
 - Emitir cada línea `:mifare_check_sN` **en cuanto el sector se resuelve** (streaming),
