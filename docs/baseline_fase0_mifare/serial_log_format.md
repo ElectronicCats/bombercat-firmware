@@ -263,6 +263,60 @@ El comando `mifare check --dump` hace la cadena (barrido + dump) en **un solo
 comando**, para el host que sí está conectado; `mifare dump` a secas usa las
 claves del último barrido.
 
+### el disparador de campo (Fase 4, tarea 4.3 — implementado)
+
+El botón de usuario de la placa (BOM v1.3): **SW2**, rotulado *GPIO*, sobre
+RP2040 **GPIO17 = Arduino D5**, activo a LOW contra GND — el mismo botón que
+usa el sketch MagSpoof (`MagStripe::classic()` → `pinButton = 5`). El otro
+botón, **SW1** (*RESET*), es el pin RUN del RP2040: reinicia la placa, así que
+**no** puede ser un disparador. El LED de la placa (LED1) está en GPIO27 =
+D15 = `LED_BUILTIN`.
+
+Dos gestos:
+
+- **pulsación corta** → *one-shot*: la cadena corre para la tarjeta que está
+  en el campo (el dump usa las claves del barrido ya hecho: **ninguna
+  autenticación extra**). Sin tarjeta en el campo, **arma** el one-shot y la
+  siguiente detección lo dispara.
+- **pulsación larga** (≥ 1200 ms) → alterna el **flag persistente** de modo
+  standalone (queda en la flash del key-store; `mifare standalone on|off` es
+  exactamente el mismo flag).
+
+El LED dice qué pasó: **1 parpadeo** = pulsación corta aceptada, **2** = modo
+standalone armado, **3** = desarmado (o acción fallida). El LED de la placa
+también lo usa el `identify` del host: los dos comparten **un** planificador
+(`MifareLedBlink`), así que nunca pelean por el pin.
+
+Líneas del log serial:
+
+```
+:mifare_trigger short
+:mifare_trigger armed
+:mifare_trigger run
+:mifare_trigger standalone on
+:mifare_trigger standalone off
+:mifare_trigger ignored busy
+:mifare_trigger error flash-write-failed
+:mifare_trigger error card-removed
+```
+
+Y el estado del disparador, con `mifare trigger` (no necesita tarjeta):
+
+```
+:mifare_trigger pin=5 long_ms=1200 armed=0 standalone=0 presses=0 long_presses=0
++OK
+```
+
+- `armed=1` → hay un one-shot armado (pulso corto sin tarjeta en el campo).
+- `standalone=1` → el modo persistente está encendido.
+- `presses` / `long_presses` → los contadores del botón.
+
+El disparador se consulta **en cada iteración de `loop()`**, antes de
+cualquier `return` temprano: funciona en todos los estados (escaneando, con
+sesión abierta, esperando una retirada, barriendo) y **no bloquea**. Pero el
+barrido **bloquea** `loop()` (segundos o minutos según la tarjeta): una
+pulsación durante el barrido solo se ve cuando el barrido termina.
+
 
 ## Notas de implementación (Fase 1)
 

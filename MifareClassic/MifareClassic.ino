@@ -41,6 +41,12 @@
  * (custom-first fusion, Fase 3 Tarea 3.5); with an empty store the sweep is
  * bit-identical to the Fase 1 baseline.
  *
+ * Fase 4 (tarea 4.3) adds the FIELD TRIGGER: the board's user button (SW2,
+ * "GPIO" in the BOM, on RP2040 GPIO17 = Arduino D5) starts the standalone
+ * workflow with no PC attached. A short press runs the chain for the card in
+ * the field (or arms it for the next card); a long press toggles the
+ * persistent standalone flag. The board's LED says what happened.
+ *
  * Distributed as-is; no warranty is given.
  */
 
@@ -58,6 +64,7 @@
 #include "MifareClassic.h"
 #include "MifareCommands.h"
 #include "MifareKeyStore.h"
+#include "MifareStandaloneTrigger.h"
 
 NfcController nfc;
 
@@ -360,6 +367,17 @@ static uint32_t mifareSweepCacheTrailerMs = 0;
 // it instead of letting it touch the card session (re-entrancy).
 static bool mifareChainActive = false;
 
+// The field trigger (Fase 4, tarea 4.3): the board's user button (SW2 ->
+// RP2040 GPIO17 = Arduino D5) and the board's LED (LED1 -> GPIO27 = D15 =
+// LED_BUILTIN).
+//
+// Two gestures: a SHORT press runs the standalone chain for the card in the
+// field (or arms it for the next card); a LONG press toggles the persistent
+// standalone flag. The logic lives in MifareStandaloneTrigger (pure, no
+// Arduino, so it can be tested natively); the sketch owns the pins.
+static MifareStandaloneTrigger mifareTrigger;
+static MifareLedBlink mifareLed;
+
 // UID the anti-collision loop reported for the card in the field. Kept so the
 // dump step can cross-check it against the UID stored in block 0 - they differ
 // on a clone/magic card, and that difference is worth saying out loud.
@@ -394,6 +412,7 @@ void handleMifareCheck(char *args);
 void handleMifareDump(char *args);
 void handleMifareKeys(char *args);
 void handleMifareStandalone(char *args);
+void handleMifareTrigger(char *args);
 void handleMifareTiming(char *args);
 void emitKnownKeys();
 // Fase 4 (tarea 4.4): the trailer-read pass and the sector dump, used by both
@@ -403,6 +422,12 @@ static uint8_t trailerReadPass(uint8_t sectors, SweepSectorSink sink, void *ctx,
                                uint32_t *trailerAuths, uint8_t *recovered,
                                bool *removed);
 static void runStandaloneChain();
+static void pollStandaloneTrigger();
+static void onTriggerShort();
+static void onTriggerLong();
+static void mifareLedApply(uint32_t nowMs);
+static void mifareIdentifyLed();
+static bool runFieldSweepNow();
 static TrailerReadResult
 recoverKeyBViaTrailer(uint8_t sector, const uint8_t *keyA, uint8_t outKeyB[6]);
 
@@ -440,12 +465,31 @@ void setup() {
   BomberCatControl::Callbacks cb;
   cb.state = controlState;
   cb.command = bomberCatCommand;
+  // The sketch owns the board's LED (Fase 4, tarea 4.3): the button's
+  // feedback and the host's `identify` blink share ONE scheduler, so the two
+  // can never fight over the pin.
+  cb.identify = mifareIdentifyLed;
   control.setCallbacks(cb);
   control.begin(); // announce readiness to the host CLI
+
+  // The field trigger (Fase 4, tarea 4.3): the board's user button (SW2,
+  // "GPIO" in the BOM) is on RP2040 GPIO17 = Arduino D5, active LOW to GND.
+  // (The other board button, SW1, is the RP2040's RUN/reset: pressing it
+  // reboots the board, so it cannot be a trigger.)
+  pinMode(MIFARE_TRIGGER_PIN, INPUT_PULLUP);
+  mifareTrigger.begin(millis());
+  mifareLed.begin();
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, LOW);
 }
 
 void loop() {
   control.poll(); // service host CLI commands (ping/info/identify/mifare)
+
+  // The field trigger (Fase 4, tarea 4.3): polled on EVERY iteration, before
+  // any of the early returns below, so the button works in every state
+  // (scanning, session open, waiting for a removal). It never blocks.
+  pollStandaloneTrigger();
 
   if (awaitingRemoval) {
     if ((int32_t)(millis() - nextRemovalProbeAt) >= 0) {
@@ -518,7 +562,13 @@ void handleTagDetected() {
         memcpy(cached.keyA, keyA, 6);
       }
       emitMifareSessionSignal(tsMs, uidHex, cached);
-      if (mifareKeys.flags & MIFARE_KEYSTORE_FLAG_STANDALONE) {
+      // Same rule as the first detection: the standalone mode, or the
+      // field trigger's one-shot, runs the chain for this card.
+      const bool oneShot = mifareTrigger.takeOneShot();
+      if ((mifareKeys.flags & MIFARE_KEYSTORE_FLAG_STANDALONE) || oneShot) {
+        if (oneShot) {
+          Serial.println(":mifare_trigger run");
+        }
         runStandaloneChain();
       }
       openMifareSession();
@@ -1445,7 +1495,16 @@ void probeMifareBlock(uint32_t tsMs, const String &uidHex) {
   // Standalone mode (Fase 4, tarea 4.4): with no PC attached, the firmware
   // finishes the job by itself - dump the sectors the sweep cracked and emit
   // them over serial. The flag persists with the key-store.
-  if (mifareKeys.flags & MIFARE_KEYSTORE_FLAG_STANDALONE) {
+  //
+  // The field trigger (Fase 4, tarea 4.3) arms a ONE-SHOT for the next
+  // detection: the operator pressed the button with no card in the field, and
+  // this card is the one they meant. The one-shot is consumed here, so it
+  // fires exactly once.
+  const bool oneShot = mifareTrigger.takeOneShot();
+  if ((mifareKeys.flags & MIFARE_KEYSTORE_FLAG_STANDALONE) || oneShot) {
+    if (oneShot) {
+      Serial.println(":mifare_trigger run");
+    }
     runStandaloneChain();
   }
 
@@ -1829,6 +1888,211 @@ void handleMifareStandalone(char *args) {
   }
   replyOk(String("standalone ") +
           ((flags & MIFARE_KEYSTORE_FLAG_STANDALONE) ? "on" : "off"));
+}
+
+// --- Fase 4 (tarea 4.3): the field trigger -----------------------------------
+//
+// The standalone workflow needs a GESTURE to start it in the field, with no PC
+// attached. The BomberCat board has two push buttons (BOM v1.3):
+//
+//   SW1 "RESET" -> the RP2040's RUN pin: pressing it reboots the board, so it
+//                  cannot be a trigger (the reboot would kill the sweep in
+//                  progress and wipe the key-store's RAM copy).
+//   SW2 "GPIO"  -> RP2040 GPIO17 = Arduino D5, active LOW to GND. This is the
+//                  board's user button, and the very same one the MagSpoof
+//                  sketch triggers with (MagStripe::classic() ->
+//                  pinButton = 5). The board's LED1 is on GPIO27 = D15 =
+//                  LED_BUILTIN.
+//
+// The trigger speaks two gestures:
+//
+//   SHORT press -> ONE-SHOT. The chain runs for the card in the field (the
+//                  auto-probe already swept it, so the dump reuses those keys:
+//                  no extra authentications, no second sweep). With no card in
+//                  the field it ARMS the one-shot, and the next detection runs
+//                  the chain.
+//
+//   LONG press  -> TOGGLE the persistent standalone flag: armed mode, the
+//                  chain runs on every detection. The flag is persisted with
+//                  the key-store, so it survives a reset.
+//
+// The LED says what happened, because in the field the serial console may not
+// be the thing the operator is looking at:
+//
+//   1 blink  -> a short press was taken (the chain runs / is armed)
+//   2 blinks -> the long press ARMED the standalone mode
+//   3 blinks -> the long press DISARMED it (or an action failed)
+//
+// Everything here is non-blocking: the button is polled on every loop()
+// iteration, and the LED is driven by the same scheduler the host's
+// `identify` uses, so the two never fight over the pin.
+
+// Drive the board's LED from the pattern scheduler. The pin is only written
+// when the state actually changes: a USB CDC write is not free, and the
+// trigger polls this on every loop().
+static void mifareLedApply(uint32_t nowMs) {
+  static bool lastLit = false;
+  static bool initialised = false;
+  const bool lit = mifareLed.update(nowMs);
+  if (!initialised || lit != lastLit) {
+    digitalWrite(LED_BUILTIN, lit ? HIGH : LOW);
+    lastLit = lit;
+    initialised = true;
+  }
+}
+
+// The host's `identify` command: a steady blink for two seconds, so the user
+// can tell which board is which on the desk.
+static void mifareIdentifyLed() {
+  mifareLed.blinkUntil(millis() + 2000, 150, 150);
+}
+
+// Sweep the card that is in the field right now and recover the Key B's that
+// can be read back - the very same two passes the on-detection auto-probe
+// runs (the Fase 1 sweep + the trailer pass), reused through runCardSweep()
+// so there stays ONE sweep implementation (Tarea 2.4).
+//
+// Used by the field trigger when the card in the field has no sweep results
+// yet (the host drove its own sweep, so the firmware's cache is empty). The
+// per-sector results are streamed in the usual `:mifare_check_sN` format, so
+// the field operator sees the keys on the serial console too.
+//
+// Returns false when the card left the field.
+static bool runFieldSweepNow() {
+  uint8_t known[MIFARE_CHECK_KNOWN_MAX][6];
+  uint8_t knownCount = seedKnownFromStore(known, MIFARE_CHECK_KNOWN_MAX);
+  uint32_t attempts = 0, naive = 0;
+  uint8_t recovered = 0;
+
+  AutoProbeCtx ctx;
+  ctx.probeSector = MIFARE_PROBE_BLOCK / MIFARE_BLOCKS_PER_SECTOR;
+  ctx.haveKeyA = false;
+
+  if (runCardSweep(MIFARE_CHECK_DEFAULT_SECTORS, MIFARE_CHECK_DICT,
+                   MIFARE_CHECK_DICT_COUNT, known, &knownCount,
+                   autoProbeSectorSink, &ctx, &attempts, &naive,
+                   &recovered) == SWEEP_CARD_REMOVED) {
+    return false;
+  }
+
+  uint32_t trailerAuths = 0;
+  bool cardRemoved = false;
+  trailerReadPass(MIFARE_CHECK_DEFAULT_SECTORS, autoProbeSectorSink, &ctx,
+                  &trailerAuths, &recovered, &cardRemoved);
+  return !cardRemoved;
+}
+
+// A SHORT press: run the chain for the card in the field, or arm it for the
+// next card.
+static void onTriggerShort() {
+  Serial.println(":mifare_trigger short");
+  if (mifareChainActive) {
+    // The chain is already using the card: a second one would fight it for
+    // the same session.
+    Serial.println(":mifare_trigger ignored busy");
+    mifareLed.blinkTimes(3, 60, 60);
+    return;
+  }
+
+  if (mifareSessionOpen) {
+    // A card is in the field. The auto-probe already swept it, so the chain
+    // reuses those keys: no second sweep, no extra authentications.
+    if (!mifareSweepValid) {
+      // No sweep results for THIS card (the host drove its own sweep): run
+      // ours so the dump has keys to read with.
+      Serial.println(":mifare_trigger sweep");
+      if (!runFieldSweepNow()) {
+        Serial.println(":mifare_trigger error card-removed");
+        mifareLed.blinkTimes(3, 60, 60);
+        return;
+      }
+    }
+    Serial.println(":mifare_trigger run");
+    mifareLed.blinkTimes(1, 100, 100);
+    runStandaloneChain();
+    return;
+  }
+
+  // No card in the field: arm the one-shot. The next detection runs the
+  // chain (the auto-probe sweeps, then the dump reads what it cracked).
+  mifareTrigger.armOneShot();
+  Serial.println(":mifare_trigger armed");
+  mifareLed.blinkTimes(1, 100, 100);
+}
+
+// A LONG press: toggle the persistent standalone flag (armed mode).
+static void onTriggerLong() {
+  Serial.println(":mifare_trigger long");
+  const bool turnOn = !(mifareKeys.flags & MIFARE_KEYSTORE_FLAG_STANDALONE);
+  uint8_t flags = mifareKeys.flags;
+  if (turnOn) {
+    flags |= MIFARE_KEYSTORE_FLAG_STANDALONE;
+  } else {
+    flags &= (uint8_t)~MIFARE_KEYSTORE_FLAG_STANDALONE;
+  }
+  if (flags == mifareKeys.flags) {
+    // Nothing changed: do NOT rewrite the flash record (wear).
+    Serial.println(":mifare_trigger standalone unchanged");
+    mifareLed.blinkTimes(1, 100, 100);
+    return;
+  }
+  MifareKeyStore backup = mifareKeys;
+  mifareKeys.flags = flags;
+  if (!mifareKeyStoreSave(config, mifareKeys)) {
+    mifareKeys = backup; // keep RAM and flash in sync
+    Serial.println(":mifare_trigger error flash-write-failed");
+    mifareLed.blinkTimes(3, 60, 60);
+    return;
+  }
+  Serial.print(":mifare_trigger standalone ");
+  Serial.println(turnOn ? "on" : "off");
+  // 2 blinks = armed, 3 = disarmed. Distinct from the short press' single
+  // blink, so the two gestures are told apart at a glance.
+  mifareLed.blinkTimes(turnOn ? 2 : 3, 100, 100);
+}
+
+// Poll the trigger. Called from EVERY loop() iteration (before the early
+// returns), so the button answers in every state: scanning, session open,
+// waiting for a removal, sweeping. It never blocks.
+static void pollStandaloneTrigger() {
+  const uint32_t now = millis();
+  const bool pressed = (digitalRead(MIFARE_TRIGGER_PIN) == LOW); // active LOW
+  const int event = mifareTrigger.poll(pressed, now);
+  if (event == MIFARE_TRIGGER_SHORT) {
+    onTriggerShort();
+  } else if (event == MIFARE_TRIGGER_LONG) {
+    onTriggerLong();
+  }
+  // The LED is advanced AFTER the gesture is handled, so a pattern requested
+  // by the handler lights up on this very iteration.
+  mifareLedApply(now);
+}
+
+// `mifare trigger` -> :mifare_trigger pin=5 long_ms=1200 armed=0 standalone=0
+//                      presses=0 long_presses=0
+//
+// Read-only: it reports what the board's field trigger is doing, so the host
+// can tell "the operator armed a one-shot" from "the standalone mode is on"
+// without guessing. The flag itself is set with `mifare standalone on|off`
+// (or with a long press on the board's button).
+void handleMifareTrigger(char *args) {
+  if (nextArg(&args) != nullptr) {
+    replyErr("usage: mifare trigger");
+    return;
+  }
+  Serial.print(":mifare_trigger pin=");
+  Serial.print(MIFARE_TRIGGER_PIN);
+  Serial.print(" long_ms=");
+  Serial.print(MIFARE_TRIGGER_LONG_MS);
+  Serial.print(" armed=");
+  Serial.print(mifareTrigger.oneShotPending() ? 1 : 0);
+  Serial.print(" standalone=");
+  Serial.print((mifareKeys.flags & MIFARE_KEYSTORE_FLAG_STANDALONE) ? 1 : 0);
+  Serial.print(" presses=");
+  Serial.print(mifareTrigger.presses());
+  Serial.print(" long_presses=");
+  Serial.println(mifareTrigger.longPresses());
+  replyOk();
 }
 
 // Emit the cached sweep's per-sector results (the keys the last sweep
@@ -2346,14 +2610,14 @@ void handleMifareTiming(char *args) {
   replyOk();
 }
 
-// `mifare <auth|read|write|sector|keys|check|dump|standalone|timing> ...`
-// dispatch. `keys`, `standalone` and `timing` need no card; the rest require
-// an open session (Decision 5) - see the file header.
+// `mifare <auth|read|write|sector|keys|check|dump|standalone|trigger|timing>
+// ...` dispatch. `keys`, `standalone`, `trigger` and `timing` need no card; the
+// rest require an open session (Decision 5) - see the file header.
 void handleMifareCommand(char *args) {
   char *sub = nextArg(&args);
   if (sub == nullptr) {
     replyErr("usage: mifare <auth|read|write|sector|keys|check|dump|standalone"
-             "|timing> ...");
+             "|trigger|timing> ...");
     return;
   }
 
@@ -2364,6 +2628,11 @@ void handleMifareCommand(char *args) {
 
   if (strcmp(sub, "standalone") == 0) {
     handleMifareStandalone(args);
+    return;
+  }
+
+  if (strcmp(sub, "trigger") == 0) {
+    handleMifareTrigger(args);
     return;
   }
 
