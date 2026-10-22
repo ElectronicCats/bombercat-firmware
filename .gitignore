@@ -1,0 +1,23 @@
+# CI / build logs (nunca deben versionarse)
+logs/
+logs.zip
+*.log
+
+# Artefactos de compilación Arduino / RP2040
+*.uf2
+*.bin
+*.hex
+*.elf
+*.map
+build/
+
+# Capturas de baseline ad-hoc generadas localmente
+docs/baseline_fase0/
+
+# Directorios de herramientas locales (editor / asistentes)
+.claude/
+.opencode/
+
+# Basura del sistema operativo
+.DS_Store
+Thumbs.db
