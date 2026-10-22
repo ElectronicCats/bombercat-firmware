@@ -11,7 +11,7 @@
 #ifndef MIFARECLASSIC_H
 #define MIFARECLASSIC_H
 
-#define BOMBERCAT_FW_VERSION "1.5.0.0"
+#define BOMBERCAT_FW_VERSION "1.2.0.0"
 #define BOMBERCAT_FW_NAME "mifareclassic"
 
 #endif // MIFARECLASSIC_H

@@ -72,7 +72,7 @@
 // ---------------------------------------------------------------------------
 #define AP_SSID "EMVyBomberCat"
 #define AP_PASS "bombercat"
-#define BOMBERCAT_FW_VERSION "1.1.0.1"
+#define BOMBERCAT_FW_VERSION "1.2.0.0"
 WiFiServer server(80);
 
 // ---------------------------------------------------------------------------
