@@ -199,7 +199,7 @@ void SerialControl::dispatch(char *line) {
       ok();
     }
   } else if (strcmp(verb, "capture") == 0) {
-    // Arm/disarm the APDU capture tap (Fase 8). When on, the engine copies each
+    // Arm/disarm the APDU capture tap. When on, the engine copies each
     // relayed APDU out as a ":apdu <dir> <ts_ms> <hex>" event on this same
     // stream, which the host `bombercat capture` turns into a pcap for
     // Wireshark. Off the relay hot path — only a copy of the log we already

@@ -1,5 +1,5 @@
 /**
- * BomberCat MifareClassic - the standalone field trigger (Fase 4, tarea 4.3).
+ * BomberCat MifareClassic - the standalone field trigger.
  *
  * Implementation of the debounce / short-long classification / one-shot latch
  * and of the LED pattern scheduler. See MifareStandaloneTrigger.h.

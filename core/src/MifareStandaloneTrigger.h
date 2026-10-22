@@ -1,7 +1,7 @@
 /**
- * BomberCatCore - the standalone field trigger (Fase 4, tarea 4.3).
+ * BomberCatCore - the standalone field trigger.
  *
- * The standalone workflow (Fase 4, tarea 4.4) already runs on its own when
+ * The standalone workflow already runs on its own when
  * the persistent `mifare standalone on` flag is set. What was missing is the
  * GESTURE that starts it in the field, with no PC attached: the board sits
  * there, the operator walks up with a card, and something has to say "now do

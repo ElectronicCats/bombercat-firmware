@@ -41,7 +41,7 @@
 #include "WiFiConnect.h"
 
 // NfcGateLink.h pulls in NfcGateCodec.h, which exposes the vendored NFCGate
-// protobuf types (NFCData / ServerData) generated in Fase 1 along with short
+// protobuf types (NFCData / ServerData) generated along with short
 // aliases (NfcData / ServerData / NfcSource / NfcOpcode).
 
 #endif // BOMBERCAT_CORE_H

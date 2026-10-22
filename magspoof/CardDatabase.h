@@ -2,7 +2,7 @@
  * MagSpoof Flash Storage - CardDatabase
  *
  * Multi-card database with an in-RAM cache backed by FlashStorage
- * (IMPLEMENTATION_PLAN_MagSpoof_Flash.md, Phase 2). It owns the runtime cache
+ * (IMPLEMENTATION_PLAN_MagSpoof_Flash.md). It owns the runtime cache
  * from plan section 1.3 (embedded as members rather than a nested struct) and
  * implements name-based CRUD, boot loading, compaction and persistence of the
  * active-card index + button mode.
@@ -14,7 +14,7 @@
  * slot is erased.
  *
  * Track *content* validation (leading '%'/';', trailing '?', F2F charset) is
- * intentionally left to the CLI layer (Phase 3); this class validates the name
+ * intentionally left to the CLI layer; this class validates the name
  * and enforces capacity/buffer limits only.
  *
  * Distributed as-is; no warranty is given.
@@ -79,7 +79,7 @@ public:
   // Persisted physical-button mode: 0 = alternate, 1 or 2 = pinned track.
   DbStatus setButtonTrack(uint8_t mode);
 
-  // Set an existing card's SEL_RES preference (Phase 5): nfcEnabled=true,
+  // Set an existing card's SEL_RES preference: nfcEnabled=true,
   // selResMode = hasChip ? 1 : 0. Consulted by resetNfc()/emulateVisaMSD()
   // in magspoof.ino whenever this card is active.
   DbStatus setNfcMode(const char *name, bool hasChip);

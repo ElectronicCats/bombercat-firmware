@@ -23,7 +23,7 @@ namespace {
 const char kConfigKey[] = "mag_cfg";
 
 // CardEntry layout from before IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md
-// Phase 5 (CONFIG_VERSION 2), kept only so FlashStorage::readCard() can
+// (CONFIG_VERSION 2), kept only so FlashStorage::readCard() can
 // recognise and migrate records written by older firmware instead of
 // dropping them (clarifying question 5: a size/version bump must not lose
 // existing cards).
@@ -138,7 +138,7 @@ bool FlashStorage::readCard(uint8_t index, CardEntry &out) {
     return true;
   }
 
-  // Not the current layout's size: check for a pre-Phase-5 (CONFIG_VERSION 2)
+  // Not the current layout's size: check for a CONFIG_VERSION 2
   // record and migrate it forward. Anything else is an unknown/corrupt
   // layout and is dropped, same as before.
   if (actual != sizeof(LegacyCardEntryV2))

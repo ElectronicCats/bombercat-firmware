@@ -3,7 +3,7 @@
 
 // EmvKernel — pure, transport-independent EMV L2 contactless codec.
 //
-// Factored (Fase 6, task #1) from EMVyBomberCat's inline EMV reader kernel.
+// Factored from EMVyBomberCat's inline EMV reader kernel.
 // This module owns only the *pure* pieces: BER-TLV search, the 6-byte amount
 // encoding, and the DOL (PDOL/CDOL) builder driven by a terminal profile. There
 // is NO dependency on the PN7150, `Wire`, `Serial` or any Arduino global here,
@@ -16,8 +16,7 @@
 // that combine "build command bytes" with "transceive". Those wrappers keep
 // building their own APDU bytes inline and now delegate the DOL/TLV/amount work
 // to this kernel. A future NfcController-based EMV transport helper could
-// absorb the exchange side; that is left for the later core split (Fase 6, task
-// #2).
+// absorb the exchange side; that is left for the later core split.
 namespace EmvKernel {
 
 // Terminal / transaction parameters used to fill a DOL (PDOL in GPO, CDOL1 in

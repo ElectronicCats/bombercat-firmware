@@ -1,5 +1,5 @@
 // EMVyBomberCat — modo TAGS: lee un tag NFC y emite su UID.
-// Reutiliza el objeto global `nfc` (NfcController, Fase 5) del sketch
+// Reutiliza el objeto global `nfc` (NfcController) del sketch
 // principal; las primitivas que NfcController no re-expone (remoteDevice,
 // isTagDetected, reset "ligero" de la librería) se alcanzan vía nfc.raw().
 // Basado en el ejemplo oficial DetectTags de Electronic Cats.
@@ -39,7 +39,7 @@ void emvyTagsRead() {
 
   // nfc.raw().reset() (Electroniccats_PN7150::reset(), no
   // NfcController::reset()): es el "reanude discovery" ligero de la
-  // librería, distinto del bring-up completo — ver nota de Fase 5 en
+  // librería, distinto del bring-up completo — ver la nota en
   // EMVyBomberCat.ino sobre por qué no se confunden.
   nfc.raw().reset();
 }

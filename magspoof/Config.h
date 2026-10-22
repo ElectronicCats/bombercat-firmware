@@ -2,7 +2,7 @@
  * MagSpoof Flash Storage - Config
  *
  * Constants and the two flash-resident POD records for the persistent
- * multi-card MagSpoof store (IMPLEMENTATION_PLAN_MagSpoof_Flash.md, Phase 1).
+ * multi-card MagSpoof store (IMPLEMENTATION_PLAN_MagSpoof_Flash.md).
  *
  * NOTE on approach: the plan's sections 2/9 assumed the arduino-pico core with
  * raw `flash_*` SDK calls and hard-coded sector addresses. This firmware builds
@@ -35,7 +35,7 @@
 // track format (and the capacity that goes with it), so the store's record
 // layout measures itself against MagStripe::TRACK_CAPACITY instead of
 // keeping a second, drifting copy of the number.
-// v3 (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md Phase 5) adds nfcEnabled/
+// v3 (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md) adds nfcEnabled/
 // selResMode to CardEntry. FlashStorage::readCard() migrates v2 records
 // forward in place on first read (clarifying question 5), so this bump does
 // not require a factory reset -- see CardDatabase::begin().
@@ -49,12 +49,12 @@ struct CardEntry {
   char name[CARD_NAME_MAX + 1]; // NUL-terminated identifier ("BBVA", ...)
   char track1[MagStripe::TRACK_CAPACITY + 2]; // '%'...'?' + NUL  (128 bytes)
   char track2[MagStripe::TRACK_CAPACITY + 2]; // ';'...'?' + NUL  (128 bytes)
-  // Per-card SEL_RES preference (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md
-  // Phase 5). nfcEnabled=false means "no explicit preference": NFC mode
-  // switches (resetNfc() in magspoof.ino) fall back to their own default
-  // (chip for reader mode, no-chip for MSD emulation) instead of reading
-  // selResMode. selResMode is only meaningful when nfcEnabled is true:
-  // 0 = no-chip/MSD (SEL_RES 0x13), 1 = chip/EMV (SEL_RES 0x33).
+  // Per-card SEL_RES preference (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md).
+  // nfcEnabled=false means "no explicit preference": NFC mode switches
+  // (resetNfc() in magspoof.ino) fall back to their own default (chip for
+  // reader mode, no-chip for MSD emulation) instead of reading selResMode.
+  // selResMode is only meaningful when nfcEnabled is true: 0 = no-chip/MSD
+  // (SEL_RES 0x13), 1 = chip/EMV (SEL_RES 0x33).
   bool nfcEnabled;
   uint8_t selResMode;
   uint32_t crc32; // integrity over the fields above

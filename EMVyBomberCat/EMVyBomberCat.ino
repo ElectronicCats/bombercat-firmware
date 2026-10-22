@@ -2,7 +2,7 @@
  * EMVyBomberCat — firmware "navaja suiza" de EMVy Controller
  * ============================================================
  * Board : BomberCat (Electronic Cats) — RP2040 mbed + NINA-W102
- * NFC   : PN7150 (I2C, 0x28) vía `core/src/NfcController` (Fase 5) — único
+ * NFC   : PN7150 (I2C, 0x28) vía `core/src/NfcController` — único
  *         punto de acceso al chip; `nfc.raw()` alcanza las primitivas que
  *         NfcController no re-expone (remoteDevice/protocol/readerTagCmd/…).
  *
@@ -81,7 +81,7 @@ WiFiServer server(80);
 #define PN7150_IRQ (11)
 #define PN7150_VEN (13)
 #define PN7150_ADDR (0x28)
-// Único punto de acceso al PN7150 (Fase 5): NfcController evita la doble ruta
+// Único punto de acceso al PN7150: NfcController evita la doble ruta
 // al chip que existía al enlazar `core` sin adoptarlo. Las primitivas que no
 // re-expone (remoteDevice/protocol/readerTagCmd/cardModeSend/Receive/…) se
 // alcanzan vía nfc.raw() — mismo objeto físico, sin reescribir el kernel EMV.
@@ -102,7 +102,7 @@ static bool gPassthroughActive = false;
 // gEmuActive (ver más abajo); controlState() combina ambas señales.
 static bool gScanningCard = false;
 
-// Fase 5: fallos de bring-up (NFC/WiFi) ya no cuelgan el firmware en
+// Los fallos de bring-up (NFC/WiFi) ya no cuelgan el firmware en
 // `while(true)` — quedan registrados aquí y controlState() los reporta como
 // "hw-error" para que el host siga viendo la placa (ping sigue respondiendo).
 static bool gNfcFault = false;
@@ -1490,7 +1490,7 @@ static void streamBody(WiFiClient &client, const char *buf, size_t len) {
 
 // Nibble hex único para el %XX de qparam() — no confundir con
 // HexUtils::decode (cadena completa), que resuelve un problema distinto
-// (payloads EMV) y vive en core/ desde la Fase 4.
+// (payloads EMV) y vive en core/.
 static int _hexNib(char c) {
   if (c >= '0' && c <= '9')
     return c - '0';
@@ -2805,7 +2805,7 @@ void setup() {
   digitalWrite(LED_BUILTIN, LOW);
 #endif
 
-  // Fase 5: el plano de control se levanta ANTES del bring-up de WiFi/NFC,
+  // El plano de control se levanta ANTES del bring-up de WiFi/NFC,
   // para que un fallo de cualquiera de los dos deje la placa reportando
   // "hw-error" en vez de muda — antes un fallo de WiFi colgaba el setup()
   // en while(true) sin llegar nunca a control.begin(), y ni siquiera `ping`
@@ -2844,7 +2844,7 @@ void setup() {
 // Estado del plano de control (reportado por `info`/:state): "emulating"
 // mientras hay una emulación NDEF/EMV en curso (gEmuActive), "scanning"
 // mientras se espera una tarjeta/tag (WAIT/SCAN/CARDSCAN/TAG), "hw-error"
-// (Fase 5) si el bring-up de NFC o WiFi falló — la placa sigue respondiendo
+// si el bring-up de NFC o WiFi falló — la placa sigue respondiendo
 // ping/info aunque el hardware no esté listo —, "idle" en cualquier otro
 // momento.
 const char *controlState() {

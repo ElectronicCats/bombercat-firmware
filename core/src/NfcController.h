@@ -54,7 +54,7 @@ public:
   // Returns true when one is detected.
   bool waitForTag(uint16_t timeoutMs = 500);
 
-  // Detection diagnostics (Fase 4, Sesión 11): how many waits, how many
+  // Detection diagnostics: how many waits, how many
   // found the card, how many expired and how many unrelated notifications
   // were drained on the way. They are what tells a "the card left" from a
   // "the notification was missed" apart, on the hardware.

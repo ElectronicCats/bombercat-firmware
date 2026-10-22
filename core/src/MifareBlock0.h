@@ -2,7 +2,7 @@
  * BomberCatCore - MIFARE Classic block 0 dissection.
  *
  * On-device twin of bombercat-tools/modules/tags/mifare/block0.py (Plan de
- * Implementacion Firmware MIFARE, Fase 4 / tarea 4.4). Only the fixed layout
+ * Implementacion Firmware MIFARE). Only the fixed layout
  * of a 4-byte-UID card applies: UID(4) BCC(1) SAK(1) ATQA(2) manufacturer
  * data(8). A 7-byte-UID card lays block 0 out differently - the host's
  * parser simply declines to dissect those (returns None), and so does this

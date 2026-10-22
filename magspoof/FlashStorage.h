@@ -2,7 +2,7 @@
  * MagSpoof Flash Storage - FlashStorage
  *
  * Persistence layer for the multi-card MagSpoof store
- * (IMPLEMENTATION_PLAN_MagSpoof_Flash.md, Phase 1). It is a thin wrapper over
+ * (IMPLEMENTATION_PLAN_MagSpoof_Flash.md). It is a thin wrapper over
  * mbed TDBStore on a FlashIAP block device, the same mechanism ConfigStore uses
  * in core/src. TDBStore already gives us wear-leveling (log-structured writes),
  * storage-level CRC and compaction, so this class only maps the plan's

@@ -1,7 +1,7 @@
 // Compile-time relay configuration fallback for the NFCGate sketch.
 //
 // These values are used ONLY when there is no configuration persisted in flash
-// (ConfigStore). Once the control CLI (docs/NFCGATE_PLAN.md Fase 6) writes a
+// (ConfigStore). Once the control CLI (docs/NFCGATE_PLAN.md) writes a
 // config, the persisted values win and this file is ignored. Filling it in lets
 // the READER role be tested before the CLI exists.
 
@@ -20,7 +20,7 @@
 
 // --- Role ---
 // 0 = READER (reads a physical card), 1 = CARD/HCE (emulates to a terminal).
-// Both roles are implemented end to end (Fase 4 + Fase 5).
+// Both roles are implemented end to end.
 #define RELAY_ROLE 0
 
 // --- Autostart ---

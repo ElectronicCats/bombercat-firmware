@@ -20,7 +20,7 @@
  *     READER-tagged commands, then consumes the CARD-tagged responses that come
  *     back over TCP and injects them to the terminal.
  *
- * Both roles are implemented end to end (READER: Fase 4, CARD/HCE: Fase 5).
+ * Both roles are implemented end to end (READER and CARD/HCE).
  *
  * Distributed as-is; no warranty is given.
  */
@@ -90,7 +90,7 @@ public:
   // Count of command/response APDU pairs relayed (READER role).
   uint32_t relayedCount() const { return _relayed; }
 
-  // --- APDU capture tap (Fase 8: pcap / Wireshark) -------------------------
+  // --- APDU capture tap (pcap / Wireshark) -------------------------
   // When a sink is set, a COPY of every relayed APDU is emitted to it as one
   // structured event line:  ":apdu <dir> <ts_ms> <hex>\n"  where dir is "cmd"
   // (terminal -> card, i.e. PCD -> PICC) or "resp" (card -> terminal, i.e.
@@ -135,11 +135,11 @@ private:
          // (throttles the waitForTag probe)
   uint32_t _relayed = 0;
 
-  // Fase 8 APDU capture tap: when non-null, each relayed APDU is copied out as
+  // APDU capture tap: when non-null, each relayed APDU is copied out as
   // a ":apdu <dir> <ts_ms> <hex>" event (see setCapture()). null = disabled.
   Print *_captureOut = nullptr;
 
-  // Diagnostics / robustness (Fase 7 RF bring-up).
+  // Diagnostics / robustness (RF bring-up).
   unsigned long _lastHeartbeat = 0; // throttles the per-role liveness log
   unsigned long _awaitStart =
       0; // CARD: millis() when _awaitingResponse latched

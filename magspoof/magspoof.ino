@@ -68,7 +68,7 @@
 // from 1.2.0.0 so `bombercat info` confirms which image is actually flashed.
 //
 // 1.2.0.0: adds the persistent multi-card store and the `magcard` verb
-// (IMPLEMENTATION_PLAN_MagSpoof_Flash.md, Phase 3). Older images answer
+// (IMPLEMENTATION_PLAN_MagSpoof_Flash.md). Older images answer
 // `magcard` with "-ERR unknown command", which is how bombercat-tools tells a
 // pre-flash firmware apart and prompts a reflash.
 #define BOMBERCAT_FW_VERSION "1.2.0.0"
@@ -87,10 +87,10 @@
 #define TRACKS (2)
 #define DEBUGCAT
 // How long nfcread waits for a card to enter the field before giving up
-// (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md Phase 4.4). Longer than
+// (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md). Longer than
 // NfcController::waitForTag()'s 500ms default: this is a manual CLI command,
 // so the user needs time to physically place the card after issuing it.
-// Defined here (rather than alongside Phase 4's other NFC code) because
+// Defined here (rather than alongside the other NFC code) because
 // handleCommand() -- which uses it -- is defined earlier in the file, and
 // #define is resolved in file order, unlike Arduino's auto-prototyped
 // function declarations.
@@ -113,19 +113,19 @@ MagStripe stripe(MagStripe::forwardOnly());
 // (CardDatabase), reloaded from flash on boot.
 unsigned int buttonTrack = 0;
 
-// Persistent multi-card store (IMPLEMENTATION_PLAN_MagSpoof_Flash.md, Phase 3).
+// Persistent multi-card store (IMPLEMENTATION_PLAN_MagSpoof_Flash.md).
 // The global tracks[][]/buttonTrack above are the live playback copy of the
 // *active* card; loadActiveIntoRam() refreshes them whenever the active card or
 // its data changes, so magplay/magget/magbtn and the physical button keep
 // working unchanged while now operating on the selected card.
 CardDatabase cardDb;
 
-// PN7150 NFC controller (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md Phase 1).
+// PN7150 NFC controller (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md).
 // Default-constructed: BomberCat's PN7150 wiring (IRQ=11, VEN=13, I2C
 // addr=0x28) is baked into NfcController.h's defaults, same as NFCGate.ino.
 NfcController nfc;
 
-// SEL_RES override buffer (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md Phase 2),
+// SEL_RES override buffer (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md),
 // ported verbatim from hunterCatNFC_AllOne.ino:61-65. This is the raw
 // CORE_SET_CONFIG_CMD payload nfc.raw().configureSettings() sends to the
 // PN7150; passing uidlen==0 makes the library ignore this buffer entirely and
@@ -142,7 +142,7 @@ uint8_t uidlen = 0;
 // Which RF role the PN7150 is currently in, tracked here because
 // NfcController itself doesn't expose it -- resetNfc() is the only place
 // that switches modes, so it's the only place that needs to update this.
-// Consumed by `nfcinfo` (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md Phase 6).
+// Consumed by `nfcinfo` (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md).
 static bool nfcEmulationMode = false;
 
 // Placeholder NFCID1 used by setSelResChip(). hunterCatNFC fills this slot
@@ -407,7 +407,8 @@ static bool handleCommand(const char *verb, char *args) {
         return true;
       }
       // Persist the mode with the store so it survives a reboot (RAM-only
-      // before Phase 3); no-op if the card store failed to initialise.
+      // before the persistent store); no-op if the card store failed to
+      // initialise.
       if (cardDb.ready())
         cardDb.setButtonTrack((uint8_t)buttonTrack);
     }
@@ -422,9 +423,9 @@ static bool handleCommand(const char *verb, char *args) {
   // select <name> | set <name> <1|2> <data> | set <name> nfc <chip|nochip>.
   // One track per `set` line keeps the longest command within the REPL's
   // LINE_MAX input buffer; the host CLI composes an add-with-tracks out of
-  // `add` + two `set`s. `set <name> nfc ...` (Phase 5.3) stores this card's
+  // `add` + two `set`s. `set <name> nfc ...` stores this card's
   // SEL_RES preference, consulted by resetNfc()/emulateVisaMSD() whenever the
-  // card is active (Phase 5.4).
+  // card is active.
   if (strcmp(verb, "magcard") == 0) {
     if (!cardDb.ready()) {
       Serial.println("-ERR not ready");
@@ -610,7 +611,7 @@ static bool handleCommand(const char *verb, char *args) {
   }
 
   // nfcselres <chip|nochip> -- manual SEL_RES override
-  // (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md Phase 2.4). Pushes the
+  // (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md). Pushes the
   // chip/no-chip bit immediately; a later mode switch (resetNfc(), e.g. via
   // nfcread/nfcvisa in later phases) resets it back to that mode's default.
   if (strcmp(verb, "nfcselres") == 0) {
@@ -633,7 +634,7 @@ static bool handleCommand(const char *verb, char *args) {
   }
 
   // nfcvisa -- start a VISA MSD contactless emulation session against a
-  // terminal (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md Phase 3.4). Blocks the
+  // terminal (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md). Blocks the
   // REPL for the duration of the exchange (bounded by VISA_MSD_TIMEOUT_MS).
   if (strcmp(verb, "nfcvisa") == 0) {
     if (!emulateVisaMSD()) {
@@ -645,7 +646,7 @@ static bool handleCommand(const char *verb, char *args) {
   }
 
   // nfcread [name] -- read a physical EMV/Visa card's Track 2 over NFC and
-  // store it (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md Phase 4.4, extended
+  // store it (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md, extended
   // to target a chosen card rather than always the active one). Switches the
   // PN7150 into reader mode, waits up to NFC_READ_WAIT_TAG_MS for a card to
   // enter the field, then runs the PPSE/AID/GPO/READ RECORD sequence once.
@@ -733,7 +734,7 @@ static bool handleCommand(const char *verb, char *args) {
 
   // nfcinfo -- report PN7150 firmware version, current RF role, current
   // SEL_RES override and whatever tag was last detected
-  // (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md Phase 6.4). Pure status read:
+  // (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md). Pure status read:
   // unlike nfcread/nfcvisa it never switches mode or blocks waiting for a
   // tag, so it's safe to call regardless of what the chip is doing --
   // "detected tag info" is whatever remoteDevice still holds from the last
@@ -785,7 +786,7 @@ static bool handleCommand(const char *verb, char *args) {
 // Must be called AFTER beginReaderMode()/beginEmulationMode() (or a plain
 // reset()), never before: both call the library's no-arg configureSettings()
 // internally, which would overwrite this override with the chip's built-in
-// default. A mid-emulation cardReArm() (Phase 3+) re-runs that same bring-up,
+// default. A mid-emulation cardReArm() re-runs that same bring-up,
 // so any caller relying on cardReArm() must re-apply setSelResChip()
 // afterward.
 bool setSelResChip(bool hasChip) {
@@ -799,7 +800,7 @@ bool setSelResChip(bool hasChip) {
 }
 
 // SEL_RES value to apply for a given mode: the active card's stored
-// preference (Phase 5.3/5.4, `magcard set <name> nfc <chip|nochip>`) if it
+// preference (`magcard set <name> nfc <chip|nochip>`) if it
 // has one, otherwise the mode's own default (chip for reader mode, no-chip
 // for MSD emulation). Read live off cardDb.getActive() at every call site
 // (resetNfc() and emulateVisaMSD()'s cardReArm() path below) rather than
@@ -818,7 +819,7 @@ static bool selResChipFor(bool emulation) {
 // its NCI bring-up, and apply that mode's SEL_RES value (see selResChipFor()
 // above). Wraps NfcController's two mode entry points behind one call so
 // later phases (VISA MSD emulation, Track 2 extraction) can flip modes
-// without duplicating the choice at each call site; `nfcselres` (Phase 2.4)
+// without duplicating the choice at each call site; `nfcselres`
 // can still override the result afterward.
 bool resetNfc(bool emulation) {
   bool ok = emulation ? nfc.beginEmulationMode() : nfc.beginReaderMode();
@@ -828,11 +829,11 @@ bool resetNfc(bool emulation) {
   return setSelResChip(selResChipFor(emulation));
 }
 
-// --- VISA MSD emulation (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md Phase 3)
+// --- VISA MSD emulation (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md)
 // ---------------------------------------------------------------------
 
 // Canned APDU responses for a VISA MSD contactless flow, ported verbatim from
-// hunterCatNFC_AllOne.ino:73-79 (Phase 3.1): PPSE SELECT, VISA AID SELECT and
+// hunterCatNFC_AllOne.ino:73-79: PPSE SELECT, VISA AID SELECT and
 // GPO (processing) answers, plus the terminator response the original's
 // 6-step loop replays for its trailing two steps. `last`/`statusapdu` from
 // the source aren't kept as separate globals -- their bytes (the 0x70/0x57
@@ -937,7 +938,7 @@ static uint8_t buildVisaTrack2Record(uint8_t *out, uint8_t outCap) {
 // gets a terminal doesn't hang the REPL indefinitely.
 #define VISA_MSD_TIMEOUT_MS (15000)
 
-// Run one VISA MSD emulation session against a terminal (Phase 3.2), porting
+// Run one VISA MSD emulation session against a terminal, porting
 // hunterCatNFC_AllOne.ino:364-390 (visamsd()) onto NfcController's
 // cardReceive()/cardSend(). The original blindly replies to each of the 6
 // incoming commands in a fixed order (PPSE, VISA AID, GPO, READ RECORD, then
@@ -976,7 +977,7 @@ bool emulateVisaMSD() {
       // listening and keep waiting for the overall deadline. cardReArm()
       // re-runs the plain emulation bring-up (NfcController.cpp), which
       // reverts the SEL_RES override, so it must be re-applied here --
-      // via selResChipFor() (Phase 5), not a hardcoded no-chip, so a
+      // via selResChipFor(), not a hardcoded no-chip, so a
       // terminal that drops and retaps mid-run still sees the active card's
       // stored preference.
       if (nfc.cardReArm())
@@ -991,7 +992,7 @@ bool emulateVisaMSD() {
 }
 
 // --- Track 2 extraction from a real card
-// (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md Phase 4) ---------------------
+// (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md) ---------------------
 
 // Reader-mode APDU commands for the Visa flow, ported verbatim from
 // hunterCatNFC_AllOne.ino:239-242 (seekTrack2()): PPSE SELECT, VISA AID
@@ -1100,7 +1101,7 @@ static uint8_t treatPDOL(uint8_t *apdu) {
 // hunterCatNFC_AllOne.ino:234-293 (seekTrack2()); a single attempt here (the
 // caller decides whether to retry). Assumes a tag is already in the field
 // (call nfc.waitForTag() first) and the PN7150 is in reader mode. Returns the
-// packed length (same BCD-nibble format buildVisaTrack2Record() emits, Phase 3)
+// packed length (same BCD-nibble format buildVisaTrack2Record() emits)
 // written to `out`, or 0 on any transceive failure, a refused SELECT/GPO, a
 // malformed/truncated PDOL, or Track 2 being nowhere the flow reached.
 // Scan a raw APDU response `data`/`len` for the card's Track 2 in either EMV
@@ -1353,7 +1354,7 @@ static uint8_t readVisaTrack2(uint8_t *out, uint8_t outCap) {
   return 0;
 }
 
-// Inverse of packTrack2Equivalent() (Phase 3): unpack EMV tag 0x57's BCD
+// Inverse of packTrack2Equivalent(): unpack EMV tag 0x57's BCD
 // nibbles back into an ISO/ABA Track 2 string (";PAN=discretionary?", the
 // format CardDatabase stores), so an NFC-extracted card can be replayed over
 // the MagSpoof coil like any other stored card. 0xD unpacks to the '='

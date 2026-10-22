@@ -2,7 +2,7 @@
  * BomberCatCore - MIFARE Classic access bits (C1/C2/C3).
  *
  * On-device twin of bombercat-tools/modules/tags/mifare/access_bits.py
- * (Plan de Implementacion Firmware MIFARE, Fase 4 / tarea 4.4): the SAME
+ * (Plan de Implementacion Firmware MIFARE): the SAME
  * decode of a sector trailer's 3 access-condition bytes, so the firmware and
  * the host CLI reach the same verdict on the same trailer - in particular on
  * the one that decides the key-recovery shortcut ("is Key B readable with Key

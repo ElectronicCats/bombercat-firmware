@@ -1,7 +1,7 @@
 /**
  * BomberCatCore - persistent Mifare Classic key-store.
  *
- * Fase 3 of the "Plan de Implementacion Firmware MIFARE": a small, bounded
+ * Part of the "Plan de Implementacion Firmware MIFARE": a small, bounded
  * store of user-curated Mifare Classic keys kept in QSPI, so keys that are
  * NOT in the embedded default dictionary survive a reset and feed the
  * on-device dictionary sweep (`mifare check` and the on-detection auto-probe)
@@ -42,7 +42,7 @@ static const uint8_t MIFARE_KEYSTORE_FLAG_AUTOSTORE = 0x01; // auto-persist
                                                             // keys
 // Standalone mode: on detection the firmware runs the whole field workflow by
 // itself - sweep, dump the cracked sectors, emit everything over serial - with
-// no PC attached (Fase 4, tarea 4.4). The flag lives in the same record
+// no PC attached. The flag lives in the same record
 // because that record is the device's persisted MIFARE settings.
 static const uint8_t MIFARE_KEYSTORE_FLAG_STANDALONE = 0x02;
 

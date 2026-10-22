@@ -33,7 +33,7 @@ const char *dbStatusName(DbStatus s) {
 }
 
 // A name must be non-empty, fit the buffer, and carry no space/control chars so
-// the CLI's space-separated parser (Phase 3) can round-trip it.
+// the CLI's space-separated parser can round-trip it.
 bool CardDatabase::validName(const char *name) {
   if (name == nullptr)
     return false;

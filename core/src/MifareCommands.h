@@ -4,9 +4,9 @@
  * Auth/read/write/sector primitives built on top of
  * NfcController::readerTransceive(), using the PN7150's raw reader-mode
  * command bytes ported from ElectronicCats-PN7150's
- * MifareClassic_read_block/_write_block examples (see MIFARE_CLASSIC_PLAN.md
- * Phase 2). Callers are responsible for the card session already being
- * selected (a tag detected via NfcController::waitForTag()).
+ * MifareClassic_read_block/_write_block examples (see MIFARE_CLASSIC_PLAN.md).
+ * Callers are responsible for the card session already being selected (a tag
+ * detected via NfcController::waitForTag()).
  *
  * These primitives used to live in the MifareClassic sketch folder, where no
  * other firmware could reuse them: a sketch folder is compiled only into its
@@ -47,7 +47,7 @@ bool mifareAuthenticate(NfcController &nfc, uint8_t blockNum, uint8_t keyType,
 // authentication and the PN7150 has to wake it up and re-activate it, which
 // takes longer than the ~15 ms of a warm re-detection (measured). A window
 // that expires too early makes the firmware believe the card left when it is
-// right there (Fase 4, Sesión 11).
+// right there.
 bool mifareReselect(NfcController &nfc, uint16_t timeoutMs = 2000);
 
 // Read one 16-byte block into `buffer` (`bufferLen` set to the bytes

@@ -1,7 +1,7 @@
 /**
- * BomberCat MifareClassic - the standalone result store (Fase 4, tarea 4.6).
+ * BomberCat MifareClassic - the standalone result store.
  *
- * The standalone workflow (Fase 4, tarea 4.4) reads a card with no PC
+ * The standalone workflow reads a card with no PC
  * attached and emits the result over the serial port - where nobody is
  * listening when the board is in the field. This module keeps those results
  * in the board's own flash, so the operator collects them LATER, over USB,

@@ -162,7 +162,7 @@ bool NfcController::waitForTag(uint16_t timeoutMs) {
   // re-arms (the activation was consumed by the re-arm's own message reads) -
   // the loop spins FOREVER and the board stops answering the REPL entirely.
   // It did: the removal probe hung the MifareClassic sketch and it had to be
-  // power-cycled (Fase 4, Sesión 11).
+  // power-cycled.
   //
   // Here the wait has a deadline and returns "not detected" when it expires.
   // The bookkeeping the library does on the activation notification (filling
