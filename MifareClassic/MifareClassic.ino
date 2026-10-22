@@ -451,6 +451,7 @@ static void runStandaloneChain();
 static bool storeStandaloneResult(MifareResultRecord &record, uint8_t read,
                                   uint8_t failed);
 static void emitStoredResult(const MifareResultRecord &record);
+static void emitResultMeta(uint8_t index, const MifareResultRecord &record);
 static void pollStandaloneTrigger();
 static void onTriggerShort();
 static void onTriggerLong();
@@ -2100,6 +2101,9 @@ void handleMifareStandalone(char *args) {
 // `mifare results show <n>`   -> re-emit result n (0 = the newest) in the very
 //                                same wire format a live dump uses, so the
 //                                host parses it with the code it already has.
+// `mifare results show all`   -> re-emit every stored result, newest first,
+//                                in one pass (the whole ring collected over
+//                                USB without looping `show <n>` on the host).
 // `mifare results clear`      -> erase every stored result.
 //
 // None of these need a card: the results live in the board's own flash.
@@ -2108,6 +2112,28 @@ void handleMifareStandalone(char *args) {
 // "removed"), so a result collected hours later says exactly what the card
 // gave and what it did not - the honest-gap rule of the plan (transversal
 // restriction #6), which is the whole point of task 4.6.
+
+// The metadata line shared by `mifare results show <N>` and `show all`:
+// ":mifare_result<i> seq=.. ts=.. uid=.. sectors=.. read=.. failed=..", in the
+// same shape `results list` prints, so `index` is the listing position
+// (0 = newest), not the raw ring slot.
+static void emitResultMeta(uint8_t index, const MifareResultRecord &record) {
+  Serial.print(":mifare_result");
+  Serial.print(index);
+  Serial.print(" seq=");
+  Serial.print(record.seq);
+  Serial.print(" ts=");
+  Serial.print(record.tsMs);
+  Serial.print(" uid=");
+  Serial.print(record.uid);
+  Serial.print(" sectors=");
+  Serial.print(record.sectors);
+  Serial.print(" read=");
+  Serial.print(record.read);
+  Serial.print(" failed=");
+  Serial.println(record.failed);
+  Serial.flush();
+}
 
 void handleMifareResults(char *args) {
   char *sub = nextArg(&args);
@@ -2148,40 +2174,49 @@ void handleMifareResults(char *args) {
 
   if (strcmp(sub, "show") == 0) {
     char *idxTok = nextArg(&args);
-    int index = 0;
-    if (idxTok != nullptr) {
-      index = atoi(idxTok);
-      if (index < 0 || index >= MIFARE_RESULT_SLOTS) {
-        replyErr("usage: mifare results show [0..7]");
-        return;
-      }
-    }
     if (!mifareResultsReady) {
       replyErr("the results store is unavailable (flash init failed)");
       return;
     }
-    mifareResults.scan();
+    const uint8_t count = mifareResults.scan();
+
+    // `show all`: emit every stored result, newest first, in ONE pass - the
+    // field operator collects the whole ring over USB without looping
+    // `show <N>` on the host. Each result keeps the exact `show <N>` format
+    // (its metadata line + the live dump), so the host parses them with the
+    // code it already has. load() returns a shared scratch buffer, so each
+    // record is emitted fully before the next is loaded.
+    if (idxTok != nullptr && strcmp(idxTok, "all") == 0) {
+      if (count == 0) {
+        replyErr("no stored results");
+        return;
+      }
+      for (uint8_t i = 0; i < count; i++) {
+        const MifareResultRecord *record = mifareResults.load(i);
+        if (record == nullptr) {
+          continue;
+        }
+        emitResultMeta(i, *record);
+        emitStoredResult(*record);
+      }
+      replyOk();
+      return;
+    }
+
+    int index = 0;
+    if (idxTok != nullptr) {
+      index = atoi(idxTok);
+      if (index < 0 || index >= MIFARE_RESULT_SLOTS) {
+        replyErr("usage: mifare results show [<0..7>|all]");
+        return;
+      }
+    }
     const MifareResultRecord *record = mifareResults.load((uint8_t)index);
     if (record == nullptr) {
       replyErr("no such stored result");
       return;
     }
-    // The result's own metadata, in the same shape the listing uses.
-    Serial.print(":mifare_result");
-    Serial.print(index);
-    Serial.print(" seq=");
-    Serial.print(record->seq);
-    Serial.print(" ts=");
-    Serial.print(record->tsMs);
-    Serial.print(" uid=");
-    Serial.print(record->uid);
-    Serial.print(" sectors=");
-    Serial.print(record->sectors);
-    Serial.print(" read=");
-    Serial.print(record->read);
-    Serial.print(" failed=");
-    Serial.println(record->failed);
-    Serial.flush();
+    emitResultMeta((uint8_t)index, *record);
     // ... and the dump itself, in the live dump's format.
     emitStoredResult(*record);
     replyOk();
@@ -2201,7 +2236,7 @@ void handleMifareResults(char *args) {
     return;
   }
 
-  replyErr("usage: mifare results [list|show <0..7>|clear]");
+  replyErr("usage: mifare results [list|show <0..7|all>|clear]");
 }
 
 // --- the field trigger -----------------------------------
