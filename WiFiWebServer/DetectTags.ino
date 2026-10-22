@@ -59,22 +59,8 @@ void resetMode() { // Reset the configuration mode after each reading
   nfc.startDiscovery(); // NCI Discovery mode
 }
 
-// TODO: replace PrintBuf by HexUtils::print
-void PrintBuf(const byte *data,
-              const uint32_t numBytes) { // Print hex data buffer in format
-  uint32_t szPos;
-  for (szPos = 0; szPos < numBytes; szPos++) {
-    Serial.print(F("0x"));
-    // Append leading 0 for small values
-    if (data[szPos] <= 0xF)
-      Serial.print(F("0"));
-    Serial.print(data[szPos] & 0xff, HEX);
-    if ((numBytes > 1) && (szPos != numBytes - 1)) {
-      Serial.print(F(" "));
-    }
-  }
-  Serial.println();
-}
+// (PrintBuf removed: it was never called and duplicated HexUtils' "0xNN "
+// dump format already factored into core/src/HexUtils.cpp.)
 
 void displayCardInfo() { // Funtion in charge to show the card/s in te field
   char tmp[16];

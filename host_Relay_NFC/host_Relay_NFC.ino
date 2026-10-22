@@ -28,10 +28,13 @@
 
 #include "Electroniccats_PN7150.h"
 #include "arduino_secrets.h"
+#include <BomberCatControl.h> // from BomberCatCore (core/src; shared ping/info replies)
+#include <GpioUtils.h> // from BomberCatCore (core/src)
 #include <HexUtils.h>
 #include <PubSubClient.h>
 #include <SPI.h>
 #include <SerialCommand.h>
+#include <WiFiConnect.h> // from BomberCatCore (core/src)
 #include <WiFiNINA.h>
 
 // #define DEBUG
@@ -200,22 +203,8 @@ void resetMode() { // Reset the configuration mode after each reading
   nfc.startDiscovery(); // NCI Discovery mode
 }
 
-// Print hex data buffer in format
-void printBuf(const byte *data, const uint32_t numBytes) {
-  uint32_t szPos;
-  for (szPos = 0; szPos < numBytes; szPos++) {
-    Serial.print(F("0x"));
-    // Append leading 0 for small values
-    if (data[szPos] <= 0xF)
-      Serial.print(F("0"));
-
-    Serial.print(data[szPos] & 0xff, HEX);
-    if ((numBytes > 1) && (szPos != numBytes - 1)) {
-      Serial.print(F(" "));
-    }
-  }
-  Serial.println();
-}
+// (PrintBuf removed: it was never called and duplicated HexUtils' "0xNN "
+// dump format already factored into core/src/HexUtils.cpp.)
 
 void printData(uint8_t *buff, uint8_t lenbuffer, uint8_t cmd) {
   char tmp[1];
@@ -266,7 +255,7 @@ void seekTrack2() {
       Serial.println("Error reading the card!");
     }
     client.publish(outTopic, "N");
-    blink(L1, 300, 10);
+    Gpio::blink(L1, 300, 10);
   }
 }
 
@@ -322,7 +311,7 @@ void detectcard() {
         if (debug) {
           Serial.println(" - Not a valid card");
         }
-        blink(L1, 50, 20);
+        Gpio::blink(L1, 50, 20);
         break;
       }
       detectCardFlag = 1;
@@ -330,14 +319,14 @@ void detectcard() {
       if (debug) {
         Serial.println("No Detect");
       }
-      blink(L1, 50, 20);
+      Gpio::blink(L1, 50, 20);
 
       attempts++;
       if (attempts > 4) {
         client.publish(outTopic, "N");
         return;
       }
-      blink(L1, 50, 20);
+      Gpio::blink(L1, 50, 20);
 
       dhost[4] = inTopic[11];
       dhost[5] = inTopic[12];
@@ -527,45 +516,15 @@ void setup_wifi() {
     Serial.println(ssid);
   }
 
-  // check for the WiFi module:
-  if (WiFi.status() == WL_NO_MODULE) {
-    if (debug) {
-      Serial.println("Communication with WiFi module failed!");
-    }
+  // WiFi bring-up is shared with client_Relay_NFC; see core WiFiConnect.
+  status = WiFiConnect::associate(ssid, pass, 3, debug ? &Serial : nullptr);
+  if (status == WL_NO_MODULE) {
     // don't continue
     while (1)
       ;
   }
-
-  String fv = WiFi.firmwareVersion();
-  if (fv < WIFI_FIRMWARE_LATEST_VERSION) {
-    if (debug) {
-      Serial.println("Please upgrade the firmware");
-    }
-  }
-  int cont = 0;
-  // attempt to connect to WiFi network:
-  while (status != WL_CONNECTED) {
-    if (debug) {
-      Serial.print("Attempting to connect to SSID: ");
-      Serial.println(ssid);
-    }
-    // Connect to WPA/WPA2 network. Change this line if using open or WEP
-    // network:
-    status = WiFi.begin(ssid, pass);
-    if (status == WL_CONNECTED) {
-      flagWifi = 1;
-    }
-    cont++;
-    if (cont > 2) {
-      break;
-    }
-  }
-  if (debug) {
-    Serial.println("");
-    Serial.println("WiFi connected");
-    Serial.println("IP address: ");
-    Serial.println(WiFi.localIP());
+  if (status == WL_CONNECTED) {
+    flagWifi = 1;
   }
   Serial.println("OK");
   if (!flagStore) {
@@ -756,29 +715,20 @@ void reconnect() {
   }
 }
 
-void blink(int pin, int msdelay, int times) {
-  for (int i = 0; i < times; i++) {
-    digitalWrite(pin, HIGH);
-    delay(msdelay);
-    digitalWrite(pin, LOW);
-    delay(msdelay);
-  }
-}
-
 // --- BomberCat control protocol (bombercat-tools) --------------------------
 // Registered as SerialCommand verbs so they share the one Serial reader (SCmd)
-// instead of racing it. Emit the leading-marker responses the host CLI expects;
-// any other line is log noise the CLI ignores.
-void bc_ping() { Serial.println("+OK bombercat"); }
+// instead of racing it. The ping/info replies come from BomberCatControl's
+// static builders so the wire format is authored once in core; any other line
+// is log noise the CLI ignores.
+void bc_ping() { BomberCatControl::replyPing(Serial); }
 void bc_info() {
-  Serial.println(":fw " BOMBERCAT_FW_VERSION);
-  Serial.println(":fw_name host_relay_nfc");
-  Serial.println(":state idle");
-  Serial.println("+OK");
+  BomberCatControl::replyInfo(Serial, BOMBERCAT_FW_VERSION, "host_relay_nfc",
+                              "idle");
 }
 void bc_identify() {
   Serial.println("+OK");
-  blink(L1, 150, 6); // brief visual identification so a CLI ID maps to a board
+  Gpio::blink(L1, 150,
+              6); // brief visual identification so a CLI ID maps to a board
 }
 
 void setup() {
@@ -884,7 +834,7 @@ void setup() {
   dhost[2] = '#';
 
   // blink to show we started up
-  blink(L1, 200, 5);
+  Gpio::blink(L1, 200, 5);
 }
 
 void loop() { // Main loop
@@ -986,7 +936,7 @@ void get_config() {
   Serial.println(outTopic);
   Serial.print("\tID: ");
   Serial.println(hostId);
-  blink(L1, 300, 3);
+  Gpio::blink(L1, 300, 3);
 }
 
 void setup_track() {

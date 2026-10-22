@@ -29,6 +29,7 @@
 
 #include "ConfigStore.h"
 #include "EmvKernel.h"
+#include "GpioUtils.h"
 #include "HexUtils.h"
 #include "Log.h"
 #include "MagStripe.h"
@@ -37,6 +38,7 @@
 #include "RelayEngine.h"
 #include "SerialControl.h"
 #include "TagReader.h"
+#include "WiFiConnect.h"
 
 // NfcGateLink.h pulls in NfcGateCodec.h, which exposes the vendored NFCGate
 // protobuf types (NFCData / ServerData) generated in Fase 1 along with short

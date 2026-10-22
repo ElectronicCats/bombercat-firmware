@@ -72,6 +72,24 @@ void BomberCatControl::kv(const char *key, const char *value) {
   _io.println(value);
 }
 
+// --- Static reply builders (sketch-side line readers) -----------------------
+
+void BomberCatControl::replyPing(Stream &io) { io.println("+OK bombercat"); }
+
+void BomberCatControl::replyInfo(Stream &io, const char *fwVersion,
+                                 const char *fwName, const char *state) {
+  io.print(':');
+  io.print("fw ");
+  io.println(fwVersion);
+  io.print(':');
+  io.print("fw_name ");
+  io.println(fwName);
+  io.print(':');
+  io.print("state ");
+  io.println(state);
+  io.println("+OK");
+}
+
 // --- Dispatch --------------------------------------------------------------
 
 // Split the leading verb off `line`; returns a pointer to the remaining args
@@ -108,12 +126,9 @@ void BomberCatControl::dispatch(char *line) {
   char *args = splitVerb(line);
 
   if (verbIs(verb, "ping")) {
-    ok("bombercat");
+    replyPing(_io);
   } else if (verbIs(verb, "info")) {
-    kv("fw", _fw);
-    kv("fw_name", _name);
-    kv("state", _cb.state != nullptr ? _cb.state() : "idle");
-    ok();
+    replyInfo(_io, _fw, _name, _cb.state != nullptr ? _cb.state() : "idle");
   } else if (verbIs(verb, "identify")) {
     if (_cb.identify != nullptr) {
       _cb.identify();
