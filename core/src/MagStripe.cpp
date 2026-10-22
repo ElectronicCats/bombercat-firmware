@@ -9,6 +9,8 @@
  */
 #include "MagStripe.h"
 
+#include <string.h>
+
 namespace {
 // ISO/IEC 7811-2 (track 1) / 7813 (track 2) linear ASCII offsets and F2F bit
 // widths. Index 0 = track 1 (6-bit: 5 data + parity), index 1/2 = track 2/3
@@ -17,6 +19,26 @@ namespace {
 const int kSublen[] = {32, 48, 48};
 const int kBitlen[] = {7, 5, 5};
 } // namespace
+
+const char *MagStripe::validateTrack(int track, const char *data) {
+  if (data == nullptr) {
+    return "bad track";
+  }
+  size_t len = strlen(data);
+  if (len > TRACK_CAPACITY)
+    return "track too long";
+  char expectedStart = (track == 1) ? '%' : ';';
+  if (len < 3 || data[0] != expectedStart || data[len - 1] != '?')
+    return "bad track";
+  unsigned char lo = (track == 1) ? 0x20 : 0x30;
+  unsigned char hi = (track == 1) ? 0x5F : 0x3F;
+  for (size_t i = 0; i < len; i++) {
+    unsigned char c = (unsigned char)data[i];
+    if (c < lo || c > hi)
+      return "bad char";
+  }
+  return nullptr;
+}
 
 MagStripe::Config MagStripe::classic() {
   Config c;

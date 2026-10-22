@@ -85,8 +85,6 @@
 // out as '+' on some MSRs). 60 gives ample preamble at CLOCK_US bit timing.
 #define LEADING_ZEROS (60)
 #define TRACKS (2)
-// Longest track magset accepts: fits tracks[128] (+ null).
-#define TRACK_MAX_CHARS (126)
 #define DEBUGCAT
 // How long nfcread waits for a card to enter the field before giving up
 // (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md Phase 4.4). Longer than
@@ -271,24 +269,12 @@ static void rstripArgs(char *s) {
 
 // Shared ISO-track validation for `magset` and `magcard set`: returns nullptr
 // when `data` is a valid track for `track` (1 or 2), else a short error slug
-// for a "-ERR <slug>" reply. Enforces the sentinels, length, and the F2F
-// charset (MagStripe maps each char to its ISO 7813/7811 5/7-bit value via the
-// c - sublen[track] offset; invalid chars are rejected here).
+// for a "-ERR <slug>" reply. The rule itself lives in the shared core
+// (MagStripe::validateTrack), so every sketch that handles tracks validates
+// them the same way - and the ones that used to skip the check entirely (the
+// MQTT and CSV paths) can now reuse it.
 static const char *validateTrack(int track, const char *data) {
-  size_t len = strlen(data);
-  if (len > TRACK_MAX_CHARS)
-    return "track too long";
-  char expectedStart = (track == 1) ? '%' : ';';
-  if (len < 3 || data[0] != expectedStart || data[len - 1] != '?')
-    return "bad track";
-  unsigned char lo = (track == 1) ? 0x20 : 0x30;
-  unsigned char hi = (track == 1) ? 0x5F : 0x3F;
-  for (size_t i = 0; i < len; i++) {
-    unsigned char c = (unsigned char)data[i];
-    if (c < lo || c > hi)
-      return "bad char";
-  }
-  return nullptr;
+  return MagStripe::validateTrack(track, data);
 }
 
 // Grab the next space-delimited token from *pp: NUL-terminate it in place,
@@ -691,7 +677,7 @@ static bool handleCommand(const char *verb, char *args) {
       Serial.println("-ERR track 2 not found");
       return true;
     }
-    char track2[TRACK_MAX_CHARS + 2];
+    char track2[MagStripe::TRACK_CAPACITY + 2];
     if (!unpackTrack2Equivalent(packed, packedLen, track2, sizeof(track2))) {
       Serial.println("-ERR track 2 decode failed");
       return true;

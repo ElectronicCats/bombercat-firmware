@@ -35,7 +35,7 @@ enum class DbStatus : uint8_t {
   ErrNotFound, // no card with that name
   ErrExists,   // a card with that name already exists
   ErrBadName,  // empty, too long, or contains space/control chars
-  ErrTooLong,  // a track exceeds TRACK_MAX_CHARS
+  ErrTooLong,  // a track exceeds the track capacity (MagStripe::TRACK_CAPACITY)
   ErrFlash,    // underlying flash write failed
   ErrNotReady, // begin() has not succeeded
 };

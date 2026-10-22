@@ -25,10 +25,16 @@
 #include <Arduino.h>
 #include <stddef.h> // offsetof
 
+#include <Crc32.h>     // from BomberCatCore (core/src)
+#include <MagStripe.h> // from BomberCatCore (core/src): the track capacity
+
 // --- Tunables (plan section 9, flash-address macros omitted, see header) ---
 #define MAX_CARDS 50
-#define CARD_NAME_MAX 31    // usable chars; +1 for the NUL terminator
-#define TRACK_MAX_CHARS 126 // matches magset's limit in magspoof.ino
+#define CARD_NAME_MAX 31 // usable chars; +1 for the NUL terminator
+// The longest track magset accepts: the core's MagStripe engine owns the
+// track format (and the capacity that goes with it), so the store's record
+// layout measures itself against MagStripe::TRACK_CAPACITY instead of
+// keeping a second, drifting copy of the number.
 // v3 (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md Phase 5) adds nfcEnabled/
 // selResMode to CardEntry. FlashStorage::readCard() migrates v2 records
 // forward in place on first read (clarifying question 5), so this bump does
@@ -40,9 +46,9 @@
 // struct and are the only bytes covered by crc32 (see cardCrc32); keep them
 // first and do not reorder.
 struct CardEntry {
-  char name[CARD_NAME_MAX + 1];     // NUL-terminated identifier ("BBVA", ...)
-  char track1[TRACK_MAX_CHARS + 2]; // '%'...'?' + NUL  (128 bytes)
-  char track2[TRACK_MAX_CHARS + 2]; // ';'...'?' + NUL  (128 bytes)
+  char name[CARD_NAME_MAX + 1]; // NUL-terminated identifier ("BBVA", ...)
+  char track1[MagStripe::TRACK_CAPACITY + 2]; // '%'...'?' + NUL  (128 bytes)
+  char track2[MagStripe::TRACK_CAPACITY + 2]; // ';'...'?' + NUL  (128 bytes)
   // Per-card SEL_RES preference (IMPLEMENTATION_PLAN_NFC_VISA_MAGSPOOF.md
   // Phase 5). nfcEnabled=false means "no explicit preference": NFC mode
   // switches (resetNfc() in magspoof.ino) fall back to their own default
@@ -66,8 +72,12 @@ struct ConfigData {
   uint32_t crc32;      // integrity over the fields above
 };
 
-// IEEE 802.3 CRC-32 (poly 0xEDB88320) over an arbitrary buffer.
-uint32_t magCrc32(const void *data, size_t len);
+// IEEE 802.3 CRC-32 (poly 0xEDB88320) over an arbitrary buffer. It lives in
+// the shared core (Crc32) so any persisted record in the library can carry one
+// with the very same checksum.
+inline uint32_t magCrc32(const void *data, size_t len) {
+  return Crc32::compute(data, len);
+}
 
 // Integrity field for each record: computed over every byte that precedes the
 // crc32 member, so callers must zero-initialise the struct before filling it

@@ -29,8 +29,8 @@ const char kConfigKey[] = "mag_cfg";
 // existing cards).
 struct LegacyCardEntryV2 {
   char name[CARD_NAME_MAX + 1];
-  char track1[TRACK_MAX_CHARS + 2];
-  char track2[TRACK_MAX_CHARS + 2];
+  char track1[MagStripe::TRACK_CAPACITY + 2];
+  char track2[MagStripe::TRACK_CAPACITY + 2];
   uint32_t crc32;
   bool valid;
 };
