@@ -1916,6 +1916,23 @@ static void runStandaloneChain() {
 
   // Keep the result in the flash (ONE write per card, never per key).
   storeStandaloneResult(mifareResultBuild, read, failed);
+
+  // Report the OUTCOME on the LED. In the field nobody is listening to the
+  // serial dump above, so the LED is the only thing that tells the operator
+  // whether the tap was worth it - the missing last mile of standalone mode,
+  // which until now only blinked that the gesture was taken, never what it
+  // found. The cues use a slow/long shape so they read apart from the brief
+  // gesture blinks (legend in the trigger section below):
+  //   one long pulse  -> every swept sector came off (read == sectors)
+  //   two slow pulses -> partial: some sectors cracked, some are holes
+  //   fast strobe     -> nothing recovered (or the card left mid-dump)
+  if (read == 0) {
+    mifareLed.blinkTimes(6, 80, 80);
+  } else if (failed == 0) {
+    mifareLed.blinkTimes(1, 1200, 250);
+  } else {
+    mifareLed.blinkTimes(2, 450, 350);
+  }
 }
 
 // Store the result of a standalone run in the flash ring.
@@ -2214,11 +2231,18 @@ void handleMifareResults(char *args) {
 //                  the key-store, so it survives a reset.
 //
 // The LED says what happened, because in the field the serial console may not
-// be the thing the operator is looking at:
+// be the thing the operator is looking at. GESTURE acks are brief blinks:
 //
 //   1 blink  -> a short press was taken (the chain runs / is armed)
 //   2 blinks -> the long press ARMED the standalone mode
 //   3 blinks -> the long press DISARMED it (or an action failed)
+//
+// The standalone chain's RESULT is a distinct, slower vocabulary (set in
+// runStandaloneChain()), so it is not mistaken for a gesture ack:
+//
+//   1 long pulse  -> the card came off fully (every swept sector recovered)
+//   2 slow pulses -> partial: some sectors cracked, some stayed holes
+//   fast strobe   -> nothing recovered (or the card left mid-dump)
 //
 // Everything here is non-blocking: the button is polled on every loop()
 // iteration, and the LED is driven by the same scheduler the host's
@@ -2305,7 +2329,9 @@ static void onTriggerShort() {
       }
     }
     Serial.println(":mifare_trigger run");
-    mifareLed.blinkTimes(1, 100, 100);
+    // No pre-run ack blink here: the chain blocks loop(), so it would not
+    // animate until the chain is done anyway - and the chain then reports the
+    // outcome on the LED, which is the signal the operator actually wants.
     runStandaloneChain();
     return;
   }
