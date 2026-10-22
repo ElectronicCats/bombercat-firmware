@@ -55,9 +55,7 @@ are the entire discovery contract.
 
 ### Reference case: EMVy's `PING`/`ping` reconciliation
 
-`EMVyBomberCat` (see
-[`../../docs/INTEGRACION_EMVYBOMBERCAT.md`](../../docs/INTEGRACION_EMVYBOMBERCAT.md))
-is the concrete case that motivated writing this rule down. Its upstream
+`EMVyBomberCat` is the concrete case that motivated writing this rule down. Its upstream
 protocol already used `PING → PONG` for its own APDU-passthrough handshake —
 a **different, uppercase, colliding verb** that `bombercat-tools` does not
 understand and that shadows the lowercase `ping → +OK bombercat` the CLI
