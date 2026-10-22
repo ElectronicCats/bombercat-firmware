@@ -4,13 +4,13 @@
  * The canonical BomberCat Mifare dump wire format: the `:mifare_dump_sN …`
  * sector lines and the closing `:mifare_dump_stat …` line.
  *
- * It is ONE format with two carriers: the MifareClassic firmware prints it
- * over USB serial and the MifareMqtt firmware publishes it over MQTT. Both
- * used to spell the grammar out on their own (the serial side in
- * emitDumpSector()/emitStoredResult(), the MQTT side in MifareMqttPayload),
- * which meant the host parser had to trust two copies of the same rule. The
- * format lives here now, so both carriers emit the same bytes by
- * construction.
+ * It is ONE format whose carriers are the sketches that emit it: the
+ * MifareClassic firmware prints it over USB serial (today its only carrier),
+ * and any future uplink (e.g. over MQTT) shares the same builder. The
+ * sketches used to spell the grammar out on their own (the serial side in
+ * emitDumpSector()/emitStoredResult()), which meant the host parser had to
+ * trust two copies of the same rule. The format lives here now, so every
+ * carrier emits the same bytes by construction.
  *
  * The module is PURE (no Arduino.h, no radio, no flash, draws no current), so
  * it compiles in the native test harness exactly like MifareResultStore.

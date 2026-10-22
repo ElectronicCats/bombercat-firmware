@@ -1,9 +1,9 @@
 /**
  * BomberCatCore - MqttUplink (see MqttUplink.h).
  *
- * The WiFi/MQTT state machine is MifareMqtt's serviceWifi()/serviceMqtt(),
- * lifted unchanged; only the firmware-specific log prefix is parameterised
- * (`_tag`). It cannot be exercised in the native g++ harness - it is pure radio
+ * The WiFi/MQTT state machine is the same non-blocking connect/poll loop the
+ * MQTT sketches shared before it was unified here; only the firmware-specific
+ * log prefix is parameterised (`_tag`). It cannot be exercised in the native g++ harness - it is pure radio
  * glue (WiFiNINA + PubSubClient), with no decodable logic of its own - so its
  * check is the arduino-cli build of the sketches that use it.
  *

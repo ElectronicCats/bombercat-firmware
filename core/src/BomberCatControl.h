@@ -72,8 +72,9 @@ public:
   //
   // The +OK/-ERR/":key value" formatting the built-in verbs (and every
   // sketch-provided command hook) must emit. These were private and got
-  // re-implemented verbatim in MifareClassic / MifareMqtt; exposing them keeps
-  // BomberCatControl as the single source of truth for the wire format.
+  // re-implemented verbatim in the sketches (e.g. MifareClassic); exposing
+  // them keeps BomberCatControl as the single source of truth for the wire
+  // format.
   void ok();
   void ok(const char *msg);
   void err(const char *msg);

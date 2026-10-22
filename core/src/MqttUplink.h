@@ -1,13 +1,13 @@
 /**
  * BomberCatCore - MqttUplink
  *
- * The WiFi + MQTT transport shared by the MQTT firmwares (MifareMqtt,
- * MagSpoofMqtt, and future ones). It owns a WiFiNINA WiFiClient and a
- * PubSubClient and drives the whole connection lifecycle - associate, connect,
- * reconnect, re-associate on drop - as a NON-BLOCKING state machine serviced
- * from loop(), so the sketch's REPL (BomberCatControl) keeps responding while
- * the link comes up. (This is MifareMqtt's state machine, lifted verbatim; it
- * replaces MagSpoofMqtt's older busy-wait setup_wifi()/reconnect().)
+ * The WiFi + MQTT transport shared by the MQTT firmwares (MagSpoofMqtt, and
+ * future ones). It owns a
+ * WiFiNINA WiFiClient and a PubSubClient and drives the whole connection
+ * lifecycle - associate, connect, reconnect, re-associate on drop - as a
+ * NON-BLOCKING state machine serviced from loop(), so the sketch's REPL
+ * (BomberCatControl) keeps responding while the link comes up. (The state
+ * machine replaces MagSpoofMqtt's older busy-wait setup_wifi()/reconnect().)
  *
  * Firmware-specific logic stays in the sketch: this class carries no payload
  * format and subscribes to nothing on its own. A sketch wires its behaviour
