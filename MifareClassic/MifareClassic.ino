@@ -1706,8 +1706,8 @@ static uint8_t trailerReadPass(uint8_t sectors, SweepSectorSink sink, void *ctx,
 // "removed") - the host turns it into the `failed_sectors` entry.
 //
 // The line itself is built by MifareDumpFormat (the library's canonical dump
-// format), so this firmware and the MifareMqtt uplink emit the very same
-// bytes for the same card.
+// format), so this firmware emits the same bytes MifareDumpFormat's own
+// builder produces for the same card.
 static void emitDumpSector(uint8_t sector, const uint8_t *data, char keyType,
                            const char *reason) {
   char line[8 + 2 * MIFARE_SECTOR_BYTES + 32];
@@ -1721,8 +1721,8 @@ static void emitDumpSector(uint8_t sector, const uint8_t *data, char keyType,
 }
 
 // The closing stat line of a dump ("read=<n> failed=<n> total=<n>"). Built by
-// MifareDumpFormat, so this firmware and the MifareMqtt uplink emit the very
-// same bytes.
+// MifareDumpFormat, so it emits the same bytes MifareDumpFormat's own builder
+// produces for the same counters.
 static void emitDumpStat(uint8_t read, uint8_t failed, uint8_t total) {
   char line[64];
   if (MifareDumpFormat::formatStat(line, sizeof(line), read, failed, total) ==
