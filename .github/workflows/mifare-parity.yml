@@ -47,10 +47,25 @@ jobs:
         with:
           path: bombercat-firmware
 
+      # Firmware y tools se desarrollan en ramas gemelas: los test de paridad
+      # viven en la rama de tools que acompaña a esta del firmware. Si esa rama
+      # no existe en tools (p.ej. ya se mergeó), caemos a main.
+      - name: Pick tools ref
+        id: toolsref
+        run: |
+          BR="${{ github.head_ref || github.ref_name }}"
+          if git ls-remote --exit-code --heads \
+               https://github.com/ElectronicCats/bombercat-tools "$BR" >/dev/null 2>&1; then
+            echo "ref=$BR" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=main" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout tools
         uses: actions/checkout@v4
         with:
           repository: ElectronicCats/bombercat-tools
+          ref: ${{ steps.toolsref.outputs.ref }}
           path: bombercat-tools
 
       - name: Install Python
