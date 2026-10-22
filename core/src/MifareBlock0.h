@@ -1,5 +1,5 @@
 /**
- * BomberCat MifareClassic - MIFARE Classic block 0 dissection.
+ * BomberCatCore - MIFARE Classic block 0 dissection.
  *
  * On-device twin of bombercat-tools/modules/tags/mifare/block0.py (Plan de
  * Implementacion Firmware MIFARE, Fase 4 / tarea 4.4). Only the fixed layout
@@ -17,8 +17,8 @@
  *
  * Distributed as-is; no warranty is given.
  */
-#ifndef MIFAREBLOCK0_H
-#define MIFAREBLOCK0_H
+#ifndef BOMBERCAT_CORE_MIFAREBLOCK0_H
+#define BOMBERCAT_CORE_MIFAREBLOCK0_H
 
 #include <cstdint>
 
@@ -48,4 +48,4 @@ const char *mifareAtqaName(const uint8_t atqa[2]);
 // TagParser uses to classify a tag).
 bool mifareSakIsClassic(uint8_t sak);
 
-#endif // MIFAREBLOCK0_H
+#endif // BOMBERCAT_CORE_MIFAREBLOCK0_H

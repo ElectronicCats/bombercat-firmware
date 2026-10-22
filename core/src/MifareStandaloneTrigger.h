@@ -1,5 +1,5 @@
 /**
- * BomberCat MifareClassic - the standalone field trigger (Fase 4, tarea 4.3).
+ * BomberCatCore - the standalone field trigger (Fase 4, tarea 4.3).
  *
  * The standalone workflow (Fase 4, tarea 4.4) already runs on its own when
  * the persistent `mifare standalone on` flag is set. What was missing is the
@@ -37,8 +37,8 @@
  *
  * Distributed as-is; no warranty is given.
  */
-#ifndef MIFARESTANDALONETRIGGER_H
-#define MIFARESTANDALONETRIGGER_H
+#ifndef BOMBERCAT_CORE_MIFARESTANDALONETRIGGER_H
+#define BOMBERCAT_CORE_MIFARESTANDALONETRIGGER_H
 
 #include <stdint.h>
 
@@ -139,4 +139,4 @@ private:
   bool _counted = false;  // the counted pattern is the active one
 };
 
-#endif // MIFARESTANDALONETRIGGER_H
+#endif // BOMBERCAT_CORE_MIFARESTANDALONETRIGGER_H

@@ -12,6 +12,11 @@
 # módulos Python sobre un juego de vectores
 # (bombercat-tools/tests/test_mifare_parity.py).
 #
+# Esos módulos (MifareAccessBits, MifareBlock0, MifareStandaloneTrigger)
+# viven en el core shared (core/src), no en la carpeta del sketch: son
+# primitivas reutilizables por cualquier firmware que toque una tarjeta
+# Mifare, así que las compila la librería.
+#
 # El test es el que cazó el primer bug del port (una entrada mal puesta en la
 # tabla de access bits del trailer): la paridad hay que medirla, no
 # documentarla.
@@ -21,13 +26,15 @@ name: mifare-parity
 on:
   push:
     paths:
-      - "MifareClassic/MifareAccessBits.*"
-      - "MifareClassic/MifareBlock0.*"
+      - "core/src/MifareAccessBits.*"
+      - "core/src/MifareBlock0.*"
+      - "core/src/MifareStandaloneTrigger.*"
       - ".github/workflows/mifare-parity.yml"
   pull_request:
     paths:
-      - "MifareClassic/MifareAccessBits.*"
-      - "MifareClassic/MifareBlock0.*"
+      - "core/src/MifareAccessBits.*"
+      - "core/src/MifareBlock0.*"
+      - "core/src/MifareStandaloneTrigger.*"
       - ".github/workflows/mifare-parity.yml"
   workflow_dispatch:
 
@@ -59,6 +66,9 @@ jobs:
       - name: Parity test (firmware C++ vs host Python)
         working-directory: bombercat-tools
         env:
-          BOMBERCAT_FIRMWARE_DIR: ${{ github.workspace }}/bombercat-firmware/MifareClassic
+          # The Mifare twins now live in the shared core, next to the result
+          # store: BOMBERCAT_CORE_DIR is the directory both test modules use.
+          BOMBERCAT_CORE_DIR: ${{ github.workspace }}/bombercat-firmware/core/src
+          BOMBERCAT_FIRMWARE_DIR: ${{ github.workspace }}/bombercat-firmware/core/src
         run: |
-          python -m pytest tests/test_mifare_parity.py -v
+          python -m pytest tests/test_mifare_parity.py tests/test_mifare_trigger.py -v

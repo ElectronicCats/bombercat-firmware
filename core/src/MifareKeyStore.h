@@ -1,5 +1,5 @@
 /**
- * BomberCat MifareClassic - persistent Mifare Classic key-store.
+ * BomberCatCore - persistent Mifare Classic key-store.
  *
  * Fase 3 of the "Plan de Implementacion Firmware MIFARE": a small, bounded
  * store of user-curated Mifare Classic keys kept in QSPI, so keys that are
@@ -16,10 +16,13 @@
  * bumped whenever the layout changes, so an old record is rejected (and the
  * store falls back to empty) instead of being misread.
  *
+ * It used to live in the MifareClassic sketch folder, where no other firmware
+ * could reuse it: it is built on the library's own ConfigStore.
+ *
  * Distributed as-is; no warranty is given.
  */
-#ifndef MIFAREKEYSTORE_H
-#define MIFAREKEYSTORE_H
+#ifndef BOMBERCAT_CORE_MIFAREKEYSTORE_H
+#define BOMBERCAT_CORE_MIFAREKEYSTORE_H
 
 #include <Arduino.h>
 #include <ConfigStore.h>
@@ -76,4 +79,4 @@ bool mifareKeyStoreLoad(ConfigStore &config, MifareKeyStore &out);
 // Persist `store`. Returns true on success.
 bool mifareKeyStoreSave(ConfigStore &config, const MifareKeyStore &store);
 
-#endif // MIFAREKEYSTORE_H
+#endif // BOMBERCAT_CORE_MIFAREKEYSTORE_H

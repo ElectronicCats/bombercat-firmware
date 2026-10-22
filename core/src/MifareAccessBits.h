@@ -1,5 +1,5 @@
 /**
- * BomberCat MifareClassic - MIFARE Classic access bits (C1/C2/C3).
+ * BomberCatCore - MIFARE Classic access bits (C1/C2/C3).
  *
  * On-device twin of bombercat-tools/modules/tags/mifare/access_bits.py
  * (Plan de Implementacion Firmware MIFARE, Fase 4 / tarea 4.4): the SAME
@@ -17,8 +17,8 @@
  *
  * Distributed as-is; no warranty is given.
  */
-#ifndef MIFAREACCESSBITS_H
-#define MIFAREACCESSBITS_H
+#ifndef BOMBERCAT_CORE_MIFAREACCESSBITS_H
+#define BOMBERCAT_CORE_MIFAREACCESSBITS_H
 
 #include <cstdint>
 
@@ -68,4 +68,4 @@ void mifareParseAccessBits(const uint8_t *ac, MifareAccessBits &out);
 // Key A (true) or Key B (false).
 bool mifarePermAllows(MifareAccessPerm perm, bool keyA);
 
-#endif // MIFAREACCESSBITS_H
+#endif // BOMBERCAT_CORE_MIFAREACCESSBITS_H

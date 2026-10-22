@@ -1,5 +1,5 @@
 /**
- * BomberCat MifareClassic - Mifare Classic block operations.
+ * BomberCatCore - Mifare Classic block operations.
  *
  * Auth/read/write/sector primitives built on top of
  * NfcController::readerTransceive(), using the PN7150's raw reader-mode
@@ -8,16 +8,23 @@
  * Phase 2). Callers are responsible for the card session already being
  * selected (a tag detected via NfcController::waitForTag()).
  *
+ * These primitives used to live in the MifareClassic sketch folder, where no
+ * other firmware could reuse them: a sketch folder is compiled only into its
+ * own sketch. They belong to the library because they are built on top of the
+ * library's own NfcController.
+ *
  * Distributed as-is; no warranty is given.
  */
-#ifndef MIFARECOMMANDS_H
-#define MIFARECOMMANDS_H
+#ifndef BOMBERCAT_CORE_MIFARECOMMANDS_H
+#define BOMBERCAT_CORE_MIFARECOMMANDS_H
 
 #include <Arduino.h>
 #include <NfcController.h>
 
+#include "MifareCommon.h"
+
 // Authenticate `blockNum`'s sector with `key` (6 bytes) as Key A/B
-// (MIFARE_KEY_A / MIFARE_KEY_B from MifareClassic.h). Must be called before
+// (MIFARE_KEY_A / MIFARE_KEY_B from MifareCommon.h). Must be called before
 // mifareReadBlock/mifareWriteBlock on any block in that sector.
 //
 // A FAILED authentication (wrong key) leaves the MIFARE card HALTed and
@@ -69,4 +76,4 @@ bool mifareReadSector(NfcController &nfc, uint8_t sectorNum, uint8_t keyType,
                       const uint8_t *key, uint8_t *outData,
                       bool *authOk = nullptr);
 
-#endif // MIFARECOMMANDS_H
+#endif // BOMBERCAT_CORE_MIFARECOMMANDS_H

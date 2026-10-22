@@ -38,8 +38,7 @@ void print(Print &out, const uint8_t *data, size_t len) {
   }
 }
 
-namespace {
-int hexNibble(char c) {
+int nibble(char c) {
   if (c >= '0' && c <= '9')
     return c - '0';
   if (c >= 'A' && c <= 'F')
@@ -48,7 +47,6 @@ int hexNibble(char c) {
     return c - 'a' + 10;
   return -1;
 }
-} // namespace
 
 size_t decode(const char *hex, uint8_t *out, size_t maxLen) {
   size_t n = 0;
@@ -59,7 +57,7 @@ size_t decode(const char *hex, uint8_t *out, size_t maxLen) {
     }
     if (!hex[1])
       break;
-    int hi = hexNibble(hex[0]), lo = hexNibble(hex[1]);
+    int hi = nibble(hex[0]), lo = nibble(hex[1]);
     if (hi < 0 || lo < 0)
       break;
     if (n >= maxLen)

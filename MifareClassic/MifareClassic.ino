@@ -56,16 +56,18 @@
 #include <BomberCatControl.h>
 #include <ConfigStore.h>
 #include <HexUtils.h>
+#include <MifareAccessBits.h>
+#include <MifareBlock0.h>
+#include <MifareCommands.h>
+#include <MifareCommon.h>
+#include <MifareDumpFormat.h>
+#include <MifareKeyStore.h>
+#include <MifareResultStore.h>
+#include <MifareStandaloneTrigger.h>
 #include <NfcController.h>
 #include <TagReader.h>
 
-#include "MifareAccessBits.h"
-#include "MifareBlock0.h"
 #include "MifareClassic.h"
-#include "MifareCommands.h"
-#include "MifareKeyStore.h"
-#include "MifareStandaloneTrigger.h"
-#include <MifareResultStore.h>
 
 NfcController nfc;
 
@@ -771,9 +773,11 @@ void emitMifareEvent(uint32_t tsMs, const String &uidHex, uint8_t blockNum,
 // separated token as `verb` and the rest of the line, untouched, as `args`;
 // the sketch owns parsing beyond that and must emit its own +OK/-ERR
 // terminator (see BomberCatControl.h). All "mifare ..." replies below follow
-// the same leading-marker wire convention BomberCatControl itself uses
-// (":key value" data lines, "+OK [text]" / "-ERR text" terminators) since
-// that logic is private to BomberCatControl and not reusable here.
+// the same leading-marker wire convention the core uses; the formatting
+// itself now comes from BomberCatControl's public reply helpers (ok/err/kv)
+// so there is a single wire-format implementation in `core`. The local shims
+// only bind the shared `control` instance to this sketch's String-based call
+// sites.
 
 // Splits the next whitespace-separated token off *cursor, advancing it past
 // the token (and its trailing separator). Returns nullptr, leaving *cursor
@@ -796,26 +800,18 @@ static char *nextArg(char **cursor) {
   return start;
 }
 
-static int hexNibble(char c) {
-  if (c >= '0' && c <= '9')
-    return c - '0';
-  if (c >= 'A' && c <= 'F')
-    return c - 'A' + 10;
-  if (c >= 'a' && c <= 'f')
-    return c - 'a' + 10;
-  return -1;
-}
-
 // Parses exactly `expectedBytes` * 2 hex chars from `hex` into `out`. Rejects
-// any other length or a non-hex character.
+// any other length or a non-hex character. (Strict on purpose: HexUtils::
+// decode() is lenient and would silently accept spaces or skip bad input,
+// which would truncate keys/blocks on the wire.)
 static bool parseHexBytes(const char *hex, uint8_t *out,
                           uint8_t expectedBytes) {
   if (hex == nullptr || strlen(hex) != (size_t)expectedBytes * 2) {
     return false;
   }
   for (uint8_t i = 0; i < expectedBytes; i++) {
-    int hi = hexNibble(hex[i * 2]);
-    int lo = hexNibble(hex[i * 2 + 1]);
+    int hi = HexUtils::nibble(hex[i * 2]);
+    int lo = HexUtils::nibble(hex[i * 2 + 1]);
     if (hi < 0 || lo < 0) {
       return false;
     }
@@ -841,23 +837,17 @@ static bool parseKeyType(const char *tok, uint8_t *keyType) {
   return false;
 }
 
-static void replyOk() { Serial.println("+OK"); }
+// Thin delegations to the shared `control` instance (BomberCatControl): the
+// +OK/-ERR/":key value" formatting is authored once in core and the String
+// overloads below keep this sketch's ~90 call sites untouched.
+static void replyOk() { control.ok(); }
 
-static void replyOk(const String &msg) {
-  Serial.print("+OK ");
-  Serial.println(msg);
-}
+static void replyOk(const String &msg) { control.ok(msg.c_str()); }
 
-static void replyErr(const char *msg) {
-  Serial.print("-ERR ");
-  Serial.println(msg);
-}
+static void replyErr(const char *msg) { control.err(msg); }
 
 static void replyKv(const char *key, const String &value) {
-  Serial.print(':');
-  Serial.print(key);
-  Serial.print(' ');
-  Serial.println(value);
+  control.kv(key, value.c_str());
 }
 
 // Force the next authentication to run from a clean SELECT. If the card still
@@ -1714,23 +1704,34 @@ static uint8_t trailerReadPass(uint8_t sectors, SweepSectorSink sink, void *ctx,
 // and the key type that opened it ("A"/"B", "-" for a hole). A sector that
 // could not be read carries the reason as a third token ("nokey", "readfail",
 // "removed") - the host turns it into the `failed_sectors` entry.
-static void emitDumpSector(uint8_t sector, const uint8_t *data,
-                           const char *keyType, const char *reason) {
-  Serial.print(":mifare_dump_s");
-  Serial.print(sector);
-  Serial.print(' ');
-  Serial.print(data != nullptr
-                   ? TagReader::hexCompact(data, MIFARE_BLOCKS_PER_SECTOR *
-                                                     MIFARE_BLOCK_SIZE)
-                   : String("-"));
-  Serial.print(' ');
-  Serial.print(keyType);
-  if (reason != nullptr) {
-    Serial.print(' ');
-    Serial.print(reason);
+//
+// The line itself is built by MifareDumpFormat (the library's canonical dump
+// format), so this firmware and the MifareMqtt uplink emit the very same
+// bytes for the same card.
+static void emitDumpSector(uint8_t sector, const uint8_t *data, char keyType,
+                           const char *reason) {
+  char line[8 + 2 * MIFARE_SECTOR_BYTES + 32];
+  if (MifareDumpFormat::formatSector(line, sizeof(line), sector, data, keyType,
+                                     reason) == 0) {
+    Serial.println("-ERR dump line too long");
+    return;
   }
-  Serial.println();
+  Serial.println(line);
   Serial.flush(); // push the line over USB now; also services the USB stack
+}
+
+// The closing stat line of a dump ("read=<n> failed=<n> total=<n>"). Built by
+// MifareDumpFormat, so this firmware and the MifareMqtt uplink emit the very
+// same bytes.
+static void emitDumpStat(uint8_t read, uint8_t failed, uint8_t total) {
+  char line[64];
+  if (MifareDumpFormat::formatStat(line, sizeof(line), read, failed, total) ==
+      0) {
+    Serial.println("-ERR dump stat too long");
+    return;
+  }
+  Serial.println(line);
+  Serial.flush();
 }
 
 // The block 0 the card returned, dissected with the SAME rules as the host's
@@ -1798,7 +1799,7 @@ static SweepResult runSectorDump(uint8_t sectors, uint8_t *read,
     const uint8_t *keyA, *keyB;
     sweepCacheGet(s, &haveA, &keyA, &haveB, &keyB);
     if (!haveA && !haveB) {
-      emitDumpSector(s, nullptr, "-", "nokey");
+      emitDumpSector(s, nullptr, '-', "nokey");
       if (collect != nullptr) {
         mifareResultSetSector(*collect, s, MIFARE_RESULT_NOKEY, '-', nullptr);
       }
@@ -1811,7 +1812,7 @@ static SweepResult runSectorDump(uint8_t sectors, uint8_t *read,
 
     // Independent auth: never ride a warm session from a previous sector.
     if (!mifareBeginAuth()) {
-      emitDumpSector(s, nullptr, "-", "removed");
+      emitDumpSector(s, nullptr, '-', "removed");
       if (collect != nullptr) {
         mifareResultSetSector(*collect, s, MIFARE_RESULT_REMOVED, '-', nullptr);
       }
@@ -1824,7 +1825,7 @@ static SweepResult runSectorDump(uint8_t sectors, uint8_t *read,
       mifareCardAuthed = false;
       if (!mifareReselect(nfc)) {
         beginCardRemovalWait();
-        emitDumpSector(s, nullptr, "-", "removed");
+        emitDumpSector(s, nullptr, '-', "removed");
         if (collect != nullptr) {
           mifareResultSetSector(*collect, s, MIFARE_RESULT_REMOVED, '-',
                                 nullptr);
@@ -1832,7 +1833,7 @@ static SweepResult runSectorDump(uint8_t sectors, uint8_t *read,
         (*failed)++;
         return SWEEP_CARD_REMOVED;
       }
-      emitDumpSector(s, nullptr, "-", "readfail");
+      emitDumpSector(s, nullptr, '-', "readfail");
       if (collect != nullptr) {
         mifareResultSetSector(*collect, s, MIFARE_RESULT_READFAIL, '-',
                               nullptr);
@@ -1854,7 +1855,7 @@ static SweepResult runSectorDump(uint8_t sectors, uint8_t *read,
     if (haveB) {
       memcpy(trailer + 10, keyB, 6);
     }
-    emitDumpSector(s, data, useA ? "A" : "B", nullptr);
+    emitDumpSector(s, data, useA ? 'A' : 'B', nullptr);
     if (collect != nullptr) {
       // AFTER the substitution: the stored bytes are the very bytes the
       // serial dump emitted.
@@ -1910,13 +1911,7 @@ static void runStandaloneChain() {
     }
     beginCardRemovalWait();
   }
-  Serial.print(":mifare_dump_stat read=");
-  Serial.print(read);
-  Serial.print(" failed=");
-  Serial.print(failed);
-  Serial.print(" total=");
-  Serial.println(mifareSweepSectors);
-  Serial.flush();
+  emitDumpStat(read, failed, mifareSweepSectors);
 
   // Keep the result in the flash (ONE write per card, never per key).
   storeStandaloneResult(mifareResultBuild, read, failed);
@@ -1971,28 +1966,18 @@ static void emitStoredResult(const MifareResultRecord &record) {
        s++) {
     const uint8_t status = record.status[s];
     if (status == MIFARE_RESULT_READ) {
-      const char *keyType = "-";
-      if (record.keyType[s] == 'A') {
-        keyType = "A";
-      } else if (record.keyType[s] == 'B') {
-        keyType = "B";
-      }
-      emitDumpSector(s, record.data[s], keyType, nullptr);
+      // formatSector() maps the stored byte ('A'/'B'/other) to the wire token
+      // itself, so the raw byte is all this needs to carry.
+      emitDumpSector(s, record.data[s], (char)record.keyType[s], nullptr);
       continue;
     }
     const char *reason = mifareResultReason(status);
     if (reason[0] == '\0') {
       reason = "nokey"; // a sector the card does not have: an honest hole
     }
-    emitDumpSector(s, nullptr, "-", reason);
+    emitDumpSector(s, nullptr, '-', reason);
   }
-  Serial.print(":mifare_dump_stat read=");
-  Serial.print(record.read);
-  Serial.print(" failed=");
-  Serial.print(record.failed);
-  Serial.print(" total=");
-  Serial.println(record.sectors);
-  Serial.flush();
+  emitDumpStat(record.read, record.failed, record.sectors);
   // The block 0 the card returned, dissected with the firmware's own
   // MifareBlock0 (the twin of the host's block0.py). NOT emitCard0(): the
   // cross-check against the anti-collision UID is about the card that is in
@@ -2044,13 +2029,7 @@ void handleMifareDump(char *args) {
     replyErr("card removed mid-dump, tap a card again");
     return;
   }
-  Serial.print(":mifare_dump_stat read=");
-  Serial.print(read);
-  Serial.print(" failed=");
-  Serial.print(failed);
-  Serial.print(" total=");
-  Serial.println(sectors);
-  Serial.flush();
+  emitDumpStat(read, failed, sectors);
   // A dump may have overrun the idle window while loop() was blocked; give a
   // follow-up REPL command the full window again.
   mifareSessionDeadline = millis() + MIFARE_SESSION_IDLE_MS;
@@ -2570,13 +2549,7 @@ void handleMifareCheck(char *args) {
         replyErr("card removed mid-dump, tap a card again");
         return;
       }
-      Serial.print(":mifare_dump_stat read=");
-      Serial.print(read);
-      Serial.print(" failed=");
-      Serial.print(failed);
-      Serial.print(" total=");
-      Serial.println(sectors);
-      Serial.flush();
+      emitDumpStat(read, failed, sectors);
     }
     return;
   }
@@ -2651,13 +2624,7 @@ void handleMifareCheck(char *args) {
       replyErr("card removed mid-dump, tap a card again");
       return;
     }
-    Serial.print(":mifare_dump_stat read=");
-    Serial.print(read);
-    Serial.print(" failed=");
-    Serial.print(failed);
-    Serial.print(" total=");
-    Serial.println(sectors);
-    Serial.flush();
+    emitDumpStat(read, failed, sectors);
   }
 
   // A long sweep may have overrun the idle window while loop() was blocked;

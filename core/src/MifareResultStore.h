@@ -43,6 +43,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "MifareCommon.h"
+
 // Layout version of the persisted record. It is bumped whenever the layout
 // changes, so a record written by another layout is REJECTED (the slot reads
 // as empty) instead of being misread.
@@ -52,7 +54,7 @@ static const uint8_t MIFARE_RESULT_VERSION = 1;
 static const uint8_t MIFARE_RESULT_MAX_SECTORS = 32;
 
 // A sector is 4 blocks of 16 bytes.
-static const uint8_t MIFARE_RESULT_SECTOR_BYTES = 64;
+static const uint8_t MIFARE_RESULT_SECTOR_BYTES = MIFARE_SECTOR_BYTES;
 
 // How many results the ring keeps. When it is full, the oldest result is
 // the one that gets overwritten.
