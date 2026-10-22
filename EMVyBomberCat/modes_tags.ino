@@ -27,9 +27,9 @@ void emvyTagsRead() {
   Serial.print(" TECH:");
   Serial.print(nfc.raw().remoteDevice.getModeTech());
   Serial.print(" UID:");
-  // Formato TAG:/TECH:/UID: mantenido por retrocompatibilidad con emvyctl
-  // (ver PLAN_IMPLEMENTACION_EMVYBOMBERCAT.md, Fase 4 #6); el hex ahora se
-  // deriva de core/src/TagReader en vez de un loop propio. hexCompact()
+  // Formato TAG:/TECH:/UID: mantenido por retrocompatibilidad con emvyctl;
+  // el hex ahora se deriva de core/src/TagReader en vez de un loop propio.
+  // hexCompact()
   // devuelve "-" para n==0, que aquí se omite para no cambiar el wire format
   // (antes imprimía nada tras "UID:" si no había UID).
   if (n > 0) {
