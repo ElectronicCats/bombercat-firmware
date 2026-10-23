@@ -13,20 +13,21 @@ uses mbed `TDBStore` / `FlashIAPBlockDevice`, which are only available there.
 | Header | Class / API | Responsibility |
 |---|---|---|
 | `Log.h` | `Log`, `LOG_ERROR/WARN/INFO/DEBUG` | Level-gated logging over a `Stream`. Replaces the scattered `if (debug) …` blocks. Levels are `LogLevel::None/Error/Warn/Info/Debug` (PascalCase: the PN7150 lib `#define ERROR`, so an all-caps enum member would be mangled by the preprocessor). |
-| `HexUtils.h` | `HexUtils::toString`, `HexUtils::print`, `HexUtils::decode`, `HexUtils::toCompact` | Hex dump formatting (factored from `getHexRepresentation` / `printData`), plus round-trip hex codec (factored from EMVyBomberCat's `hexEncode`/`hexDecode` in Fase 4): `decode()` parses a hex string (spaces ignored) into bytes, `toCompact()` writes separator-less uppercase hex into a caller buffer. |
+| `HexUtils.h` | `HexUtils::toString`, `HexUtils::print`, `HexUtils::decode`, `HexUtils::toCompact` | Hex dump formatting (factored from `getHexRepresentation` / `printData`), plus round-trip hex codec (factored from EMVyBomberCat's `hexEncode`/`hexDecode`): `decode()` parses a hex string (spaces ignored) into bytes, `toCompact()` writes separator-less uppercase hex into a caller buffer. |
 | `NfcController.h` | `NfcController` | Wrapper over `Electroniccats_PN7150`: `beginReaderMode()`, `beginEmulationMode()`, `reset()`, `waitForTag()`, `readerTransceive()`, `cardReceive()` / `cardSend()`. Setup failures **return false** instead of hanging. |
 | `ConfigStore.h` | `ConfigStore`, `RelayConfig`, `RelayRole` | Persistent WiFi + NFCGate relay config (SSID/pass, server host/port, session byte, role) on `TDBStore`. |
 | `NfcGateCodec.h` | `NfcGateCodec::makeNfcData/encodeFrame/decodeServerData`; aliases `NfcData`, `ServerData`, `NfcSource`, `NfcType`, `NfcOpcode` | **Arduino-free** codec for the NFCGate wire format: builds/parses the length-prefixed `ServerData{NFCData}` frames. No sockets — pure bytes, so it is host-testable (see below). Short aliases tame the very long generated nanopb names. |
 | `NfcGateLink.h` | `NfcGateLink` | TCP transport to `nfcgate-server` over an Arduino `Client&` (WiFiNINA `WiFiClient` on device). `connect()`, `send()`, `sendControl()` (SYN/ACK/FIN), non-blocking `poll()` / `receive()`. Owns the asymmetric framing (`[4B len BE][1B session][payload]` c→s); delegates protobuf to `NfcGateCodec`. WiFi *association* stays in the sketch. |
-| `RelayEngine.h` | `RelayEngine` | Glue over `NfcController` + `NfcGateLink`: `begin()` (NFC bring-up + connect + `OP_SYN` session join), non-blocking `loop()`, `stop()` (`OP_FIN`). Owns the SYN/ACK handshake and the **READER**-role relay loop (command in → card transceive → response out). CARD role is a stub (Fase 5). No WiFiNINA dependency — WiFi stays in the sketch. |
+| `RelayEngine.h` | `RelayEngine` | Glue over `NfcController` + `NfcGateLink`: `begin()` (NFC bring-up + connect + `OP_SYN` session join), non-blocking `loop()`, `stop()` (`OP_FIN`). Owns the SYN/ACK handshake and the **READER**-role relay loop (command in → card transceive → response out). CARD role is a stub. No WiFiNINA dependency — WiFi stays in the sketch. |
 | `FlashIAPLimits.h` | `mbed::getFlashIAPLimits()` | Computes the usable flash region past the sketch (vendored from the relay sketches). |
 | `MagStripe.h` | `MagStripe`, `MagStripe::classic()` / `forwardOnly()` | MagSpoof F2F magnetic-stripe emulation engine (blink/playBit/playTrack/storeRevTrack), factored from the identical copies in `WiFiWebServer/magspoof.ino`, `MagSpoofMqtt`, `MagspoofCVSAttack` (classic waveform) and `magspoof/magspoof.ino` (forward-only). Pins/timing + the two differing knobs (leading-zero count, reverse pass) come from `Config`; each sketch keeps only its own trigger/UX glue. |
 | `TagReader.h` | `TagReader::hexCompact`, `protocolName`, `emitTagEvent` | PN7150 tag helpers, factored from the byte-identical `getHexCompact`/`getProtocolName`/`emitTagEvent` in `DetectTags`, `DetectReaders` and `MifareClassic`. Pure formatting/mapping over the PROT_* constants and the bombercat-tools `:tag` wire format; complements `HexUtils` (which stays the human-readable "0x.." dump). |
-| `EmvKernel.h` | `EmvKernel::TerminalProfile` (`mexicoOnlinePos`), `tlvFind`, `encodeAmount`, `buildDolData` | Pure, transport-independent EMV L2 contactless codec, factored from EMVyBomberCat's inline reader kernel (Fase 6, task #1): recursive BER-TLV search, the 6-byte amount encoding, and the DOL (PDOL/CDOL) builder driven by a `TerminalProfile`. **No** PN7150/`Wire`/`Serial` dependency, so it is host-testable. The APDU *exchange* (`apduExchange` + NCI reassembly) and the thin `selectPPSE`/`selectAID`/`getProcessingOptions`/`readRecord`/`generateAC` transceive wrappers stay in the sketch — they drive the PN7150 and belong to the transport layer, not the codec. |
-| `proto/…` | `NFCData`, `ServerData` | NFCGate wire messages, generated with nanopb in Fase 1. See [`proto/UPSTREAM.md`](proto/UPSTREAM.md). |
+| `EmvKernel.h` | `EmvKernel::TerminalProfile` (`mexicoOnlinePos`), `tlvFind`, `encodeAmount`, `buildDolData` | Pure, transport-independent EMV L2 contactless codec, factored from EMVyBomberCat's inline reader kernel: recursive BER-TLV search, the 6-byte amount encoding, and the DOL (PDOL/CDOL) builder driven by a `TerminalProfile`. **No** PN7150/`Wire`/`Serial` dependency, so it is host-testable. The APDU *exchange* (`apduExchange` + NCI reassembly) and the thin `selectPPSE`/`selectAID`/`getProcessingOptions`/`readRecord`/`generateAC` transceive wrappers stay in the sketch — they drive the PN7150 and belong to the transport layer, not the codec. |
+| `MifareResultStore.h` | `MifareResultStore`, `MifareResultRecord`, `MifareResultBlob` | Standalone MIFARE read-result ring (8 slots) persisted to flash through `ConfigStore`'s blob callbacks. **Arduino-free on purpose** (reaches flash through the `MifareResultBlob` callbacks, not `ConfigStore` directly), so it is host-testable — see `bombercat-tools/tests/test_mifare_result_store.py`. Factored from the byte-identical copies in the MIFARE sketches (the `MifareClassic` firmware owns one; a now-removed MQTT uplink sketch owned the other). |
+| `proto/…` | `NFCData`, `ServerData` | NFCGate wire messages, generated with nanopb. See [`proto/UPSTREAM.md`](proto/UPSTREAM.md). |
 | `pb*.{h,c}` | nanopb runtime | Vendored nanopb 0.4.9.1 runtime (`pb.h`, `pb_common`, `pb_encode`, `pb_decode`), zlib-licensed — see `NANOPB_LICENSE.txt`. Kept flat in `src/` so the generated `proto/*.pb.h` resolve `#include <pb.h>` via the library's include path. |
 
-Coming in later phases: CARD-role relay (Fase 5), `SerialControl`.
+Coming in later phases: CARD-role relay, `SerialControl`.
 
 ## Contract: every new firmware MUST mount BomberCatControl
 
@@ -54,9 +55,7 @@ are the entire discovery contract.
 
 ### Reference case: EMVy's `PING`/`ping` reconciliation
 
-`EMVyBomberCat` (see
-[`../../docs/INTEGRACION_EMVYBOMBERCAT.md`](../../docs/INTEGRACION_EMVYBOMBERCAT.md))
-is the concrete case that motivated writing this rule down. Its upstream
+`EMVyBomberCat` is the concrete case that motivated writing this rule down. Its upstream
 protocol already used `PING → PONG` for its own APDU-passthrough handshake —
 a **different, uppercase, colliding verb** that `bombercat-tools` does not
 understand and that shadows the lowercase `ping → +OK bombercat` the CLI
@@ -154,9 +153,9 @@ arduino-cli compile -b electroniccats:mbed_rp2040:bombercat \
 
 `CoreSelfTest` exercises every public symbol (including a `NfcGateCodec`
 round-trip and `NfcGateLink` over a `WiFiClient`); it is a compile check, not a
-functional relay. Fase 2 was verified building clean against
+functional relay. It was verified building clean against
 `electroniccats:mbed_rp2040` 2.0.0 + `Electronic Cats PN7150` 3.1.1 (~112 KB
-flash / 45 KB RAM); re-run the command above after the Fase 3 additions.
+flash / 45 KB RAM); re-run the command above after the later additions.
 
 ### Host test for the wire format (no board, no RF)
 
@@ -171,7 +170,7 @@ tools/testserver/codec_hosttest/build_and_run.sh   # terminal 2: g++ + loopback
 
 A green `CODEC HOST TEST PASSED` proves the bytes the RP2040 will emit are
 accepted and relayed by the real server (and that server frames decode back to
-the original APDUs). RF/PN7150 are not involved — this is the Fase 3 / §6 "mock"
+the original APDUs). RF/PN7150 are not involved — this is the §6 "mock"
 verification. See [`../../tools/testserver/codec_hosttest/`](../../tools/testserver/codec_hosttest/).
 
 ## Notes on fidelity to the legacy sketches

@@ -33,7 +33,7 @@ const char *dbStatusName(DbStatus s) {
 }
 
 // A name must be non-empty, fit the buffer, and carry no space/control chars so
-// the CLI's space-separated parser (Phase 3) can round-trip it.
+// the CLI's space-separated parser can round-trip it.
 bool CardDatabase::validName(const char *name) {
   if (name == nullptr)
     return false;
@@ -141,17 +141,17 @@ DbStatus CardDatabase::add(const char *name, const char *track1,
     return DbStatus::ErrExists;
   if (full())
     return DbStatus::ErrFull;
-  if ((track1 && strlen(track1) > TRACK_MAX_CHARS) ||
-      (track2 && strlen(track2) > TRACK_MAX_CHARS))
+  if ((track1 && strlen(track1) > MagStripe::TRACK_CAPACITY) ||
+      (track2 && strlen(track2) > MagStripe::TRACK_CAPACITY))
     return DbStatus::ErrTooLong;
 
   CardEntry &c = _cards[_count];
   memset(&c, 0, sizeof(c));
   strncpy(c.name, name, CARD_NAME_MAX);
   if (track1)
-    strncpy(c.track1, track1, TRACK_MAX_CHARS);
+    strncpy(c.track1, track1, MagStripe::TRACK_CAPACITY);
   if (track2)
-    strncpy(c.track2, track2, TRACK_MAX_CHARS);
+    strncpy(c.track2, track2, MagStripe::TRACK_CAPACITY);
 
   if (!_flash.writeCard(_count, c))
     return DbStatus::ErrFlash;
@@ -168,18 +168,18 @@ DbStatus CardDatabase::update(const char *name, const char *track1,
   int idx = find(name);
   if (idx < 0)
     return DbStatus::ErrNotFound;
-  if ((track1 && strlen(track1) > TRACK_MAX_CHARS) ||
-      (track2 && strlen(track2) > TRACK_MAX_CHARS))
+  if ((track1 && strlen(track1) > MagStripe::TRACK_CAPACITY) ||
+      (track2 && strlen(track2) > MagStripe::TRACK_CAPACITY))
     return DbStatus::ErrTooLong;
 
   CardEntry &c = _cards[idx];
   if (track1) {
     memset(c.track1, 0, sizeof(c.track1));
-    strncpy(c.track1, track1, TRACK_MAX_CHARS);
+    strncpy(c.track1, track1, MagStripe::TRACK_CAPACITY);
   }
   if (track2) {
     memset(c.track2, 0, sizeof(c.track2));
-    strncpy(c.track2, track2, TRACK_MAX_CHARS);
+    strncpy(c.track2, track2, MagStripe::TRACK_CAPACITY);
   }
   if (!_flash.writeCard(idx, c))
     return DbStatus::ErrFlash;
@@ -273,9 +273,9 @@ bool CardDatabase::factoryReset(const char *defName, const char *defTrack1,
   memset(&c, 0, sizeof(c));
   strncpy(c.name, defName ? defName : "DEFAULT", CARD_NAME_MAX);
   if (defTrack1)
-    strncpy(c.track1, defTrack1, TRACK_MAX_CHARS);
+    strncpy(c.track1, defTrack1, MagStripe::TRACK_CAPACITY);
   if (defTrack2)
-    strncpy(c.track2, defTrack2, TRACK_MAX_CHARS);
+    strncpy(c.track2, defTrack2, MagStripe::TRACK_CAPACITY);
 
   if (!_flash.writeCard(0, c))
     return false;

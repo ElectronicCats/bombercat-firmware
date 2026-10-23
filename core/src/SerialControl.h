@@ -6,7 +6,7 @@
  * carrying any APDUs on the wire (APDUs go over WiFi/TCP — see
  * docs/NFCGATE_PLAN.md).
  *
- * This is the device end of docs/NFCGATE_PLAN.md Fase 6.
+ * This is the device end of docs/NFCGATE_PLAN.md.
  *
  * Wire protocol (ASCII, one command per line, '\n'-terminated):
  *
@@ -46,7 +46,7 @@
  * <on|off>          -> +OK capture on|off   arm/disarm the APDU tap. While on,
  * the engine copies each relayed APDU out as ":apdu <dir> <ts_ms> <hex>"
  * (dir=cmd|resp) on this stream — the host turns it into a pcap for Wireshark
- * (Fase 8). Bare `capture` or `capture status` -> :capture <0|1> +OK. reboot ->
+ * Bare `capture` or `capture status` -> :capture <0|1> +OK. reboot ->
  * +OK, then resets the MCU
  *
  * The relay actions (run/stop/reboot) are provided by the sketch as callbacks

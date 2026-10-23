@@ -85,8 +85,7 @@ void encodeAmount(uint64_t cents, uint8_t *out6) {
   // Ésta fue la causa raíz confirmada en hardware (2026-09-22) del SW=6985 que
   // hacía fallar `bombercat emvy read` con Mastercard mientras Visa funcionaba:
   // con el monto en BCD la tarjeta acepta el GENERATE AC y devuelve
-  // ARQC/ATC/IAD reales. Detalle completo en
-  // bombercat-firmware/docs/MASTERCARD_READ_FIX_EMVYBOMBERCAT.md.
+  // ARQC/ATC/IAD reales.
   for (int i = 5; i >= 0; i--) {
     uint8_t lo = (uint8_t)(cents % 10);
     cents /= 10;

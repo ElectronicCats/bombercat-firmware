@@ -1,0 +1,8 @@
+# Compilación baseline — MifareClassic (Fase 0, plan MIFARE)
+# Fecha: 2026-09-25T15:03:49-06:00
+# FQBN: electroniccats:mbed_rp2040:bombercat
+# Comando: arduino-cli compile --fqbn electroniccats:mbed_rp2040:bombercat --library core MifareClassic
+# Core: electroniccats:mbed_rp2040 2.0.0 | arduino-cli 1.5.1
+---
+El Sketch usa 104676 bytes (4%) del espacio de almacenamiento de programa. El máximo es 2097152 bytes.
+Las variables Globales usan 44936 bytes (17%) de la memoria dinámica, dejando 217208 bytes para las variables locales. El máximo es 262144 bytes.

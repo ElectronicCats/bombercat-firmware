@@ -12,8 +12,8 @@ NFCGate peer — another BomberCat, or the NFCGate Android app — through an
 [ terminal/PoS ] <--RF--- [   peer  CARD/HCE ] <--WiFi/TCP--------+
 ```
 
-**Both roles are implemented end to end** (docs/NFCGATE_PLAN.md Fase 4 + Fase 5) and
-the device is driven over USB-serial by the control CLI (Fase 6).
+**Both roles are implemented end to end** (docs/NFCGATE_PLAN.md) and
+the device is driven over USB-serial by the control CLI.
 
 ## What each role does
 
@@ -130,7 +130,7 @@ second peer (a `card`-role peer or the NFCGate app) on the same session byte.
 - **Path B** — against the **NFCGate Android app**, both variants: B1 (BomberCat
   `reader` + phone as `card`/HCE) and B2 (BomberCat `card` + phone as `reader`)
   (2026-08-19).
-- **APDU capture (Fase 8)** — the `:apdu` tap + `bombercat capture` write a
+- **APDU capture** — the `:apdu` tap + `bombercat capture` write a
   Wireshark-openable pcap; validated on HW by capturing a real Path A EMV
   transaction (`CapturaWireshark.pcapng`).
 - **Per-transaction latency** — brought down from ~12–15 s to **~4.5 s**

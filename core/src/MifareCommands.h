@@ -1,23 +1,30 @@
 /**
- * BomberCat MifareClassic - Mifare Classic block operations.
+ * BomberCatCore - Mifare Classic block operations.
  *
  * Auth/read/write/sector primitives built on top of
  * NfcController::readerTransceive(), using the PN7150's raw reader-mode
  * command bytes ported from ElectronicCats-PN7150's
- * MifareClassic_read_block/_write_block examples (see MIFARE_CLASSIC_PLAN.md
- * Phase 2). Callers are responsible for the card session already being
- * selected (a tag detected via NfcController::waitForTag()).
+ * MifareClassic_read_block/_write_block examples (see MIFARE_CLASSIC_PLAN.md).
+ * Callers are responsible for the card session already being selected (a tag
+ * detected via NfcController::waitForTag()).
+ *
+ * These primitives used to live in the MifareClassic sketch folder, where no
+ * other firmware could reuse them: a sketch folder is compiled only into its
+ * own sketch. They belong to the library because they are built on top of the
+ * library's own NfcController.
  *
  * Distributed as-is; no warranty is given.
  */
-#ifndef MIFARECOMMANDS_H
-#define MIFARECOMMANDS_H
+#ifndef BOMBERCAT_CORE_MIFARECOMMANDS_H
+#define BOMBERCAT_CORE_MIFARECOMMANDS_H
 
 #include <Arduino.h>
 #include <NfcController.h>
 
+#include "MifareCommon.h"
+
 // Authenticate `blockNum`'s sector with `key` (6 bytes) as Key A/B
-// (MIFARE_KEY_A / MIFARE_KEY_B from MifareClassic.h). Must be called before
+// (MIFARE_KEY_A / MIFARE_KEY_B from MifareCommon.h). Must be called before
 // mifareReadBlock/mifareWriteBlock on any block in that sector.
 //
 // A FAILED authentication (wrong key) leaves the MIFARE card HALTed and
@@ -35,7 +42,13 @@ bool mifareAuthenticate(NfcController &nfc, uint8_t blockNum, uint8_t keyType,
 // selected state. Returns true if a card was re-selected within `timeoutMs`,
 // false if none is in the field any more. See the .cpp for the hardware note
 // on why this uses the full reader re-arm.
-bool mifareReselect(NfcController &nfc, uint16_t timeoutMs = 500);
+//
+// The detection window has to be generous: the card is HALTed by the failed
+// authentication and the PN7150 has to wake it up and re-activate it, which
+// takes longer than the ~15 ms of a warm re-detection (measured). A window
+// that expires too early makes the firmware believe the card left when it is
+// right there.
+bool mifareReselect(NfcController &nfc, uint16_t timeoutMs = 2000);
 
 // Read one 16-byte block into `buffer` (`bufferLen` set to the bytes
 // written). Requires a prior successful mifareAuthenticate() on the same
@@ -63,4 +76,4 @@ bool mifareReadSector(NfcController &nfc, uint8_t sectorNum, uint8_t keyType,
                       const uint8_t *key, uint8_t *outData,
                       bool *authOk = nullptr);
 
-#endif // MIFARECOMMANDS_H
+#endif // BOMBERCAT_CORE_MIFARECOMMANDS_H

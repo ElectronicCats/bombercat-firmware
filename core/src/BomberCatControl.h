@@ -68,12 +68,29 @@ public:
   // identify blink. Call once per loop(); never blocks.
   void poll();
 
-private:
-  void dispatch(char *line);
+  // --- Public reply helpers -------------------------------------------------
+  //
+  // The +OK/-ERR/":key value" formatting the built-in verbs (and every
+  // sketch-provided command hook) must emit. These were private and got
+  // re-implemented verbatim in the sketches (e.g. MifareClassic); exposing
+  // them keeps BomberCatControl as the single source of truth for the wire
+  // format.
   void ok();
   void ok(const char *msg);
   void err(const char *msg);
   void kv(const char *key, const char *value);
+
+  // Static reply builders for sketches that keep their own line reader (e.g.
+  // the legacy SerialCommand-based relay sketches) and therefore cannot mount
+  // this REPL. They emit exactly the same bytes as the `ping` / `info`
+  // built-ins above; `identify` stays sketch-side because its blink policy
+  // (blocking vs. poll-driven) is a sketch decision.
+  static void replyPing(Stream &io);
+  static void replyInfo(Stream &io, const char *fwVersion, const char *fwName,
+                        const char *state);
+
+private:
+  void dispatch(char *line);
 
   // Built-in identify blink (used when no identify callback is supplied).
   void startIdentify();

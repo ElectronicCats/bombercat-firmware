@@ -77,7 +77,7 @@ Todos aceptan `--port /dev/ttyACMx` para fijar el puerto si hay más de un dispo
 
 ## Discovery Contract (plano de control conforme)
 
-Desde la **Fase 2** de la integración con `core/`, el plano de control (`ping`/`info`/
+Con la integración con `core/`, el plano de control (`ping`/`info`/
 `identify`/verbo-desconocido) ya no lo implementa este sketch: lo sirve
 `core/src/BomberCatControl` (el mismo REPL de `MifareClassic`/`DetectTags`/…), para que
 cualquier host conforme —el CLI de `bombercat-tools`, la GUI y la TUI de EMVy— descubra e
@@ -98,7 +98,7 @@ identifique la placa de forma **idéntica** al resto del monorepo:
   al instante y el LED (`LED_BUILTIN`, ~2 s / toggle cada 150 ms) lo bombea `core` desde
   `control.poll()` (§6.2.1) — EMVy no necesita un `identifyPump()` propio.
 - `:state` reemplaza al antiguo `:role emv-multitool` (divergencia ya corregida).
-- **Fase 5.** El acceso al PN7150 pasa por `NfcController` (`core/`), cerrando la doble ruta
+- El acceso al PN7150 pasa por `NfcController` (`core/`), cerrando la doble ruta
   al chip; un fallo de bring-up de NFC o de WiFi ya no cuelga el firmware en `while(true)` —
   el plano de control se levanta *antes* del bring-up de hardware, así que `ping`/`info`
   siguen respondiendo y `:state` reporta `hw-error` en vez de dejar la placa muda.
@@ -115,7 +115,7 @@ que la placa aparezca con ✓ en `device list`— ya es conforme.
 ## Estructura (sketch multi-archivo — Arduino concatena los .ino)
 
 - `EMVyBomberCat.ino` — base: lector EMV + passthrough + servidor web + dispatcher serie.
-- `modes_tags.ino`    — modo TAGS (reusa el objeto global `nfc`, `NfcController` desde la Fase 5).
+- `modes_tags.ino`    — modo TAGS (reusa el objeto global `nfc`, `NfcController`).
 - `modes_mag.ino`     — modo MAG (magspoof, pines A=6/B=7).
 
 ## Compilar y flashear

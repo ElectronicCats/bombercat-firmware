@@ -70,6 +70,22 @@ public:
   // Factory defaults: empty credentials, default port, session 1, READER role.
   static RelayConfig defaults();
 
+  // ── Generic key/value blobs ─────────────────────────────────────────────
+  //
+  // TDBStore is a full key-value store underneath, so a sketch that needs to
+  // persist something else (e.g. the Mifare Classic key-store) reuses THIS
+  // instance instead of mounting a second FlashIAPBlockDevice over the same
+  // flash region - which would collide with this one.
+  //
+  // A blob is a fixed-size POD byte record. `loadBlob` rejects a record
+  // written with a different size (a layout change is never silently
+  // misread) and reports false, leaving `buf` untouched; callers are expected
+  // to fall back to their own defaults in that case.
+  bool loadBlob(const char *key, void *buf, size_t size);
+  bool saveBlob(const char *key, const void *buf, size_t size);
+  bool hasBlob(const char *key);
+  bool clearBlob(const char *key);
+
 private:
   bool _ready = false;
   FlashIAPBlockDevice *_bd = nullptr;

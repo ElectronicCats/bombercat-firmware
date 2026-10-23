@@ -9,13 +9,13 @@
  *                                                                     |
  *   [ terminal/PoS ] <--RF--- [   peer  CARD/HCE ] <--WiFi/TCP--------+
  *
- * Both roles are implemented end to end (docs/NFCGATE_PLAN.md Fase 4 + Fase 5):
+ * Both roles are implemented end to end (docs/NFCGATE_PLAN.md):
  *   - READER: receive a command over TCP -> replay to the physical card ->
  *     return the response.
  *   - CARD/HCE: read the terminal's command over RF -> forward it over TCP ->
  *     inject the peer's response back to the terminal.
  *
- * Control plane (Fase 6): the device boots into a SerialControl REPL so the
+ * Control plane: the device boots into a SerialControl REPL so the
  * Python CLI in tools/ can configure it (WiFi + nfcgate params, persisted in
  * ConfigStore), start/stop the relay and read status over USB-serial — no APDUs
  * travel on the serial link. Send `ping`, `info`, `set ...`, `save`, `run`,
@@ -37,7 +37,7 @@
 
 #include "arduino_secrets.h"
 
-#define BOMBERCAT_FW_VERSION "1.2.0.0"
+#define BOMBERCAT_FW_VERSION "1.3.0.0"
 
 // Bound the server TCP connect so a host that is reachable but silently drops
 // the SYN fails fast (clean -ERR) instead of hanging tens of seconds and

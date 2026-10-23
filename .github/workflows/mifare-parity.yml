@@ -1,0 +1,89 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 Electronic Cats
+#
+# SPDX-License-Identifier: MIT
+#
+# Paridad de la lógica de "descifrado" entre el firmware y el CLI.
+#
+# El firmware de MifareClassic replica en C++ dos piezas de la lógica del host
+# (access_bits.py y block0.py) para poder recuperar claves y leer sectores por
+# su cuenta (Plan de Implementación Firmware MIFARE, Fase 4 / tarea 4.4).
+# "La misma lógica en los dos lados" solo vale algo si se COMPRUEBA: este
+# workflow compila los módulos del firmware con g++ y los contrasta con los
+# módulos Python sobre un juego de vectores
+# (bombercat-tools/tests/test_mifare_parity.py).
+#
+# Esos módulos (MifareAccessBits, MifareBlock0, MifareStandaloneTrigger)
+# viven en el core shared (core/src), no en la carpeta del sketch: son
+# primitivas reutilizables por cualquier firmware que toque una tarjeta
+# Mifare, así que las compila la librería.
+#
+# El test es el que cazó el primer bug del port (una entrada mal puesta en la
+# tabla de access bits del trailer): la paridad hay que medirla, no
+# documentarla.
+
+name: mifare-parity
+
+on:
+  push:
+    paths:
+      - "core/src/MifareAccessBits.*"
+      - "core/src/MifareBlock0.*"
+      - "core/src/MifareStandaloneTrigger.*"
+      - ".github/workflows/mifare-parity.yml"
+  pull_request:
+    paths:
+      - "core/src/MifareAccessBits.*"
+      - "core/src/MifareBlock0.*"
+      - "core/src/MifareStandaloneTrigger.*"
+      - ".github/workflows/mifare-parity.yml"
+  workflow_dispatch:
+
+jobs:
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout firmware
+        uses: actions/checkout@v4
+        with:
+          path: bombercat-firmware
+
+      # Firmware y tools se desarrollan en ramas gemelas: los test de paridad
+      # viven en la rama de tools que acompaña a esta del firmware. Si esa rama
+      # no existe en tools (p.ej. ya se mergeó), caemos a main.
+      - name: Pick tools ref
+        id: toolsref
+        run: |
+          BR="${{ github.head_ref || github.ref_name }}"
+          if git ls-remote --exit-code --heads \
+               https://github.com/ElectronicCats/bombercat-tools "$BR" >/dev/null 2>&1; then
+            echo "ref=$BR" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=main" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout tools
+        uses: actions/checkout@v4
+        with:
+          repository: ElectronicCats/bombercat-tools
+          ref: ${{ steps.toolsref.outputs.ref }}
+          path: bombercat-tools
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r bombercat-tools/requirements-dev.txt
+
+      - name: Parity test (firmware C++ vs host Python)
+        working-directory: bombercat-tools
+        env:
+          # The Mifare twins now live in the shared core, next to the result
+          # store: BOMBERCAT_CORE_DIR is the directory both test modules use.
+          BOMBERCAT_CORE_DIR: ${{ github.workspace }}/bombercat-firmware/core/src
+          BOMBERCAT_FIRMWARE_DIR: ${{ github.workspace }}/bombercat-firmware/core/src
+        run: |
+          python -m pytest tests/test_mifare_parity.py tests/test_mifare_trigger.py -v

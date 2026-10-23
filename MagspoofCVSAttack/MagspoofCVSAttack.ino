@@ -29,7 +29,7 @@
 #include <BomberCatControl.h>
 #include <MagStripe.h>
 
-#define BOMBERCAT_FW_VERSION "1.1.1.0"
+#define BOMBERCAT_FW_VERSION "1.2.0.0"
 
 #define DEBUG
 #define L1 (LED_BUILTIN) // LED1

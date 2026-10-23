@@ -1,7 +1,7 @@
 /**
  * BomberCatCore - CoreSelfTest
  *
- * Compile/smoke sketch for the Fase 2 core skeleton. It does not perform a real
+ * Compile/smoke sketch for the core skeleton. It does not perform a real
  * relay; it just exercises every public symbol so the library builds cleanly on
  * the target (Arduino Mbed OS RP2040 core) and demonstrates basic usage.
  *
@@ -16,12 +16,12 @@ NfcController nfc;
 ConfigStore config;
 RelayConfig cfg;
 
-// NfcGateLink over a WiFiClient (Fase 3). Not connected here — this sketch is a
+// NfcGateLink over a WiFiClient. Not connected here — this sketch is a
 // compile/symbol check, not a live relay.
 WiFiClient wifiClient;
 NfcGateLink link(wifiClient);
 
-// RelayEngine (Fase 4/5) + SerialControl (Fase 6). Exercised for symbols only.
+// RelayEngine + SerialControl. Exercised for symbols only.
 RelayEngine engine(nfc, link, cfg);
 SerialControl control(Serial, config, cfg, engine, "selftest");
 
@@ -70,12 +70,12 @@ void setup() {
   }
   link.setSession(cfg.session); // reference NfcGateLink symbols
 
-  // --- SerialControl (Fase 6) --- announce readiness; no callbacks wired here.
+  // --- SerialControl --- announce readiness; no callbacks wired here.
   SerialControl::Callbacks cb; // all null: run/stop/reboot return -ERR/no-op
   control.setCallbacks(cb);
   control.begin();
 
-  // --- APDU capture tap (Fase 8) --- reference the symbols.
+  // --- APDU capture tap --- reference the symbols.
   engine.setCapture(&Serial);
   LOG_INFO(engine.capturing() ? "capture on" : "capture off");
   engine.setCapture(nullptr);
@@ -91,7 +91,7 @@ void setup() {
 }
 
 void loop() {
-  control.poll(); // service the control REPL (Fase 6)
+  control.poll(); // service the control REPL
 
   uint8_t buf[256];
   uint8_t len = 0;

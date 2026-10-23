@@ -11,7 +11,7 @@
  */
 #include "MifareCommands.h"
 
-#include "MifareClassic.h"
+#include "MifareCommon.h"
 
 // PN7150 reader-mode raw command opcodes (see the ElectronicCats-PN7150
 // examples this was ported from - not documented in API.md).

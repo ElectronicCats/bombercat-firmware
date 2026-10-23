@@ -19,7 +19,7 @@
 #include <HexUtils.h>
 #include <TagReader.h>
 
-#define BOMBERCAT_FW_VERSION "1.2.0.0"
+#define BOMBERCAT_FW_VERSION "1.3.0.0"
 
 #define PN7150_IRQ (11)
 #define PN7150_VEN (13)
@@ -89,7 +89,7 @@ void loop() {
     // point to poll() the control REPL from, so the CLI is unresponsive here
     // until the tag is physically removed. Fixing this needs a change in the
     // Electronic_Cats_PN7150 library itself (deferred, see
-    // IMPLEMENTATION_PLAN_ImproveDetectTags.md Phase 6 / FW-3).
+    // IMPLEMENTATION_PLAN_ImproveDetectTags.md FW-3).
     nfc.waitForTagRemoval();
     Serial.println("Card removed!");
 
@@ -104,7 +104,7 @@ void loop() {
     // internal order) - calling it before stopDiscovery() (i.e. before
     // reset(), which was the first attempt at this fix) silently had no
     // effect, confirmed on hardware. See IMPLEMENTATION_PLAN_
-    // ImproveDetectTags.md Phase 6 / FW-3 for the full trace-based
+    // ImproveDetectTags.md FW-3 for the full trace-based
     // diagnosis.
     nfc.stopDiscovery();
     nfc.configureSettings();

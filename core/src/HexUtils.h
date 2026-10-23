@@ -33,6 +33,12 @@ size_t decode(const char *hex, uint8_t *out, size_t maxLen);
 // size accordingly (at least len*2 + 1 bytes).
 void toCompact(const uint8_t *data, size_t len, char *out);
 
+// Parses a single hex digit ('0'-'9', 'A'-'F', 'a'-'f') into its value, or
+// -1 if the character is not a hex digit. Exposed because strict callers
+// (fixed-length field parsing) need byte-exact control that decode()'s
+// lenient grammar does not provide.
+int nibble(char c);
+
 } // namespace HexUtils
 
 #endif // BOMBERCAT_CORE_HEXUTILS_H

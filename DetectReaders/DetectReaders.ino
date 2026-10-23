@@ -32,7 +32,7 @@
 #include <BomberCatControl.h>
 #include <TagReader.h>
 
-#define BOMBERCAT_FW_VERSION "1.2.0.0"
+#define BOMBERCAT_FW_VERSION "1.3.0.0"
 
 #define PN7150_IRQ (11)
 #define PN7150_VEN (13)

@@ -79,7 +79,7 @@ int NfcGateLink::poll(ServerData &sd, NfcData &nfc) {
     return -1;
   }
 
-  // Phase 1: accumulate the 4-byte big-endian length header. Read whatever of
+  // Accumulate the 4-byte big-endian length header. Read whatever of
   // the header is still missing in ONE bulk _c.read() instead of byte-by-byte
   // (Fase F, LATENCIA_OPTIMIZACION.md §2 H5). On the BomberCat the WiFiClient
   // is WiFiNINA: the ESP32-WROOM is an SPI coprocessor, so *every* _c.read()
@@ -114,7 +114,7 @@ int NfcGateLink::poll(ServerData &sd, NfcData &nfc) {
     return 0;
   }
 
-  // Phase 2: accumulate the payload.
+  // Accumulate the payload.
   while (_fill < _need && _c.available() > 0) {
     size_t want = _need - _fill;
     int n = _c.read(&_rx[_fill], want);

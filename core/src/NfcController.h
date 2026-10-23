@@ -54,6 +54,31 @@ public:
   // Returns true when one is detected.
   bool waitForTag(uint16_t timeoutMs = 500);
 
+  // Detection diagnostics: how many waits, how many
+  // found the card, how many expired and how many unrelated notifications
+  // were drained on the way. They are what tells a "the card left" from a
+  // "the notification was missed" apart, on the hardware.
+  uint32_t waitTagCalls = 0;
+  uint32_t waitTagOk = 0;
+  uint32_t waitTagTimeout = 0;
+  uint32_t waitTagNotifications = 0;
+  // The notifications that actually explain a failed detection:
+  //   waitTagDiscovery  — RF_DISCOVER_NTF (0x61 0x03): the chip FOUND the
+  //                       card but waits for the host to SELECT it. Without
+  //                       the select the activation never arrives and the
+  //                       wait expires as if the card had left.
+  //   waitTagSelects    — RF_DISCOVER_SELECT_CMD sent back (our answer).
+  //   waitTagDeactivate — RF_DEACTIVATE_NTF (0x61 0x06): the card left.
+  //   waitTagErrors     — a CORE error response (0x41): the chip refused
+  //                       something (a command out of sequence, typically).
+  uint32_t waitTagDiscovery = 0;
+  uint32_t waitTagSelects = 0;
+  uint32_t waitTagDeactivate = 0;
+  uint32_t waitTagErrors = 0;
+  // How many times the reader re-arm (NfcController::reset()) failed: the
+  // chip did not come back on I²C. A failed re-arm is NOT "the card left".
+  uint32_t resetFailures = 0;
+
   // --- Reader role -------------------------------------------------------
   // Send `cmd` into the RF field and wait for the tag's response frame into
   // `resp` (`respLen` set to the length). Returns false if the first data

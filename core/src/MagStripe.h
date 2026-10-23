@@ -36,8 +36,33 @@
 
 #include <Arduino.h>
 
+#include <stddef.h>
+
 class MagStripe {
 public:
+  // The longest track the engine accepts: the track store every MagSpoof
+  // sketch keeps is `char tracks[2][128]`, so a track is 126 characters plus
+  // the terminator.
+  //
+  // Named TRACK_CAPACITY, not TRACK_MAX_CHARS: a macro with that name in a
+  // sketch would expand right here and break the build.
+  static const size_t TRACK_CAPACITY = 126;
+
+  // Validate an ISO 7811-2 (track 1) / 7813 (track 2) track string.
+  //
+  // `track` is 1 or 2. Returns nullptr when `data` is a valid track, else a
+  // short error slug ("track too long" / "bad track" / "bad char") the caller
+  // can hand to its own "-ERR <slug>" reply.
+  //
+  // It enforces the sentinels ('%'...'?' for track 1, ';'...'?' for track 2),
+  // the length cap, and the F2F charset (MagStripe maps each char to its ISO
+  // 7813/7811 5/7-bit value via the c - sublen[track] offset, so a char
+  // outside that range would be played out as noise).
+  //
+  // Pure string logic - no Arduino, no RF - so every sketch that handles
+  // tracks can share it instead of validating by hand (or not at all).
+  static const char *validateTrack(int track, const char *data);
+
   // Wiring + timing + waveform knobs. The two knobs that actually differed
   // between the sketches are `leadingZeros` and `reversePass`; everything else
   // was identical (BomberCat's PIN_A=6 / PIN_B=7 H-bridge, NPIN=5 button,
